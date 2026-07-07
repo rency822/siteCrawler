@@ -8,7 +8,7 @@ const { geoCheck } = require('./components/geoCheck');
 const { siteCrawler } = require('./components/siteCrawler');
 
 const config = {
-  headless: false,
+  headless: true,
   navigationTimeoutMs: 30000,
   waitAfterLoadMs: 1500,
 
@@ -79,12 +79,18 @@ function summarizeWholeTest(result) {
   }).length;
 
   const sceneVideoRedirectedToJoin = testedScenes.filter((item) => {
-    return item.videoPlayback?.redirectedToJoin === true;
-  });
+  return (
+    item.videoPlayback?.acceptedJoinAfterClick === true &&
+    item.videoPlayback?.redirectedToJoin === true
+  );
+});
 
-  const sceneVideoOpenedJoinForm = testedScenes.filter((item) => {
-    return item.videoPlayback?.joinFormFound === true;
-  });
+const sceneVideoOpenedJoinForm = testedScenes.filter((item) => {
+  return (
+    item.videoPlayback?.acceptedJoinAfterClick === true &&
+    item.videoPlayback?.joinFormFound === true
+  );
+});
 
   const modelPagesPassed = testedModels.filter((item) => {
     return item.ok === true && item.status === 200 && !item.error;
@@ -218,32 +224,38 @@ function summarizeWholeTest(result) {
             videoOpenedJoinForm: sceneVideoOpenedJoinForm.length,
 
             videoRedirectedToJoinItems: sceneVideoRedirectedToJoin.map((item) => ({
-              name: item.sourceText || null,
-              url: item.fullUrl || item.url,
-              finalUrl:
-                item.videoPlayback?.afterUrl ||
-                item.fullFinalUrl ||
-                item.finalUrl ||
-                null,
-              passReason: item.videoPlayback?.passReason || null,
-              videoPassed: item.videoPlayback?.passed === true,
-              redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
-              joinFormFound: item.videoPlayback?.joinFormFound === true,
-            })),
+  name: item.sourceText || null,
+  url: item.fullUrl || item.url,
+  finalUrl:
+    item.videoPlayback?.afterUrl ||
+    item.fullFinalUrl ||
+    item.finalUrl ||
+    null,
+  clicked: item.videoPlayback?.clicked === true,
+  clickedTarget: item.videoPlayback?.clickedTarget || null,
+  passReason: item.videoPlayback?.passReason || null,
+  videoPassed: item.videoPlayback?.passed === true,
+  redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+  joinFormFound: item.videoPlayback?.joinFormFound === true,
+  acceptedJoinAfterClick: item.videoPlayback?.acceptedJoinAfterClick === true,
+})),
 
-            videoOpenedJoinFormItems: sceneVideoOpenedJoinForm.map((item) => ({
-              name: item.sourceText || null,
-              url: item.fullUrl || item.url,
-              finalUrl:
-                item.videoPlayback?.afterUrl ||
-                item.fullFinalUrl ||
-                item.finalUrl ||
-                null,
-              passReason: item.videoPlayback?.passReason || null,
-              videoPassed: item.videoPlayback?.passed === true,
-              redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
-              joinFormFound: item.videoPlayback?.joinFormFound === true,
-            })),
+videoOpenedJoinFormItems: sceneVideoOpenedJoinForm.map((item) => ({
+  name: item.sourceText || null,
+  url: item.fullUrl || item.url,
+  finalUrl:
+    item.videoPlayback?.afterUrl ||
+    item.fullFinalUrl ||
+    item.finalUrl ||
+    null,
+  clicked: item.videoPlayback?.clicked === true,
+  clickedTarget: item.videoPlayback?.clickedTarget || null,
+  passReason: item.videoPlayback?.passReason || null,
+  videoPassed: item.videoPlayback?.passed === true,
+  redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+  joinFormFound: item.videoPlayback?.joinFormFound === true,
+  acceptedJoinAfterClick: item.videoPlayback?.acceptedJoinAfterClick === true,
+})),
 
             broken: brokenScenes.length,
             brokenItems: brokenScenes.map((item) => ({

@@ -654,15 +654,26 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
     posterFound: false,
     playButtonFound: false,
     videoElementFound: false,
+    fakeThumbFound: false,
+
     clicked: false,
+    clickedTarget: null,
+
     redirectedToJoin: false,
     joinFormFound: false,
+
+    joinDetectedBeforeClick: false,
+    joinDetectedAfterClick: false,
+    acceptedJoinAfterClick: false,
+
     beforeUrl: page.url(),
     afterUrl: null,
+
     currentTimeBefore: null,
     currentTimeAfter: null,
     timeAdvanced: false,
     pausedAfterCheck: false,
+
     passed: false,
     passReason: null,
     error: null,
@@ -671,13 +682,36 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
   try {
     console.log(`[${name}] checking video playback quickly`);
 
+    result.joinDetectedBeforeClick = await pageHasJoinForm(page).catch(() => false);
+
     const player = page.locator('.video-js, .vjs-tech, video').first();
     const poster = page.locator('.vjs-poster').first();
     const playButton = page.locator('.vjs-big-play-button, .vjs-play-control').first();
 
-    result.playerFound = await player.isVisible({ timeout: timeoutMs }).catch(() => false);
-    result.posterFound = await poster.isVisible({ timeout: 3000 }).catch(() => false);
-    result.playButtonFound = await playButton.isVisible({ timeout: 3000 }).catch(() => false);
+    const fakeThumb = page
+      .locator(
+        [
+          '.fake-thumb-wrap',
+          '.fake-thumb-wrap img',
+          '.content-page-header-inner .fake-thumb-wrap',
+          '.content-page-header-inner .fake-thumb-wrap img',
+          '.content-page-header-inner img.img-responsive',
+          '.content-page-header img.img-responsive',
+        ].join(', ')
+      )
+      .first();
+
+    result.playerFound = await player
+      .isVisible({ timeout: timeoutMs })
+      .catch(() => false);
+
+    result.posterFound = await poster
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+
+    result.playButtonFound = await playButton
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
 
     result.videoElementFound = await page
       .locator('video')
@@ -685,22 +719,9 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
       .then((count) => count > 0)
       .catch(() => false);
 
-    if (!result.playerFound && !result.posterFound && !result.videoElementFound) {
-      const alreadyJoin = await pageHasJoinForm(page);
-
-      if (alreadyJoin) {
-        result.afterUrl = page.url();
-        result.redirectedToJoin = isJoinUrl(result.afterUrl);
-        result.joinFormFound = true;
-        result.passed = true;
-        result.passReason = 'join form/page found instead of playable video';
-        return result;
-      }
-
-      result.error = 'No video player/poster/video element found';
-      console.log(`[${name}] ${result.error}`);
-      return result;
-    }
+    result.fakeThumbFound = await fakeThumb
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
 
     result.currentTimeBefore = await page
       .locator('video')
@@ -713,20 +734,43 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
         timeout: 3000,
         force: true,
       });
+
       result.clicked = true;
+      result.clickedTarget = 'play-button';
     } else if (result.posterFound) {
       await poster.click({
         timeout: 3000,
         force: true,
       });
+
       result.clicked = true;
-    } else {
+      result.clickedTarget = 'poster-thumb';
+    } else if (result.videoElementFound) {
       await page
         .locator('video')
         .first()
         .evaluate((video) => video.play())
         .catch(() => null);
+
       result.clicked = true;
+      result.clickedTarget = 'video-play-api';
+    } else if (result.fakeThumbFound) {
+      console.log(`[${name}] no Video.js/video found, clicking fake thumbnail`);
+
+      await fakeThumb.click({
+        timeout: 3000,
+        force: true,
+      });
+
+      result.clicked = true;
+      result.clickedTarget = 'fake-thumb';
+    } else {
+      result.afterUrl = page.url();
+      result.error = 'No video player/poster/video element/fake thumb found';
+
+      console.log(`[${name}] ${result.error}`);
+
+      return result;
     }
 
     await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
@@ -735,16 +779,32 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
 
     result.afterUrl = page.url();
     result.redirectedToJoin = isJoinUrl(result.afterUrl);
-    result.joinFormFound = await pageHasJoinForm(page);
+    result.joinDetectedAfterClick = await pageHasJoinForm(page).catch(() => false);
 
-    if (result.redirectedToJoin || result.joinFormFound) {
+    result.joinFormFound =
+      result.joinDetectedAfterClick === true &&
+      result.joinDetectedBeforeClick !== true;
+
+    result.acceptedJoinAfterClick =
+      result.clicked === true &&
+      (
+        result.redirectedToJoin === true ||
+        result.joinFormFound === true
+      );
+
+    if (result.acceptedJoinAfterClick) {
       result.passed = true;
       result.passReason = result.redirectedToJoin
         ? 'video click redirected to join page'
         : 'video click opened join form';
 
-      console.log(`[${name}] video accepted as pass because it redirected/opened join`);
+      console.log(`[${name}] video accepted as pass because click redirected/opened join`);
+      console.log(`[${name}] clickedTarget=${result.clickedTarget}`);
+      console.log(`[${name}] beforeUrl=${result.beforeUrl}`);
       console.log(`[${name}] afterUrl=${result.afterUrl}`);
+      console.log(`[${name}] redirectedToJoin=${result.redirectedToJoin}`);
+      console.log(`[${name}] joinFormFound=${result.joinFormFound}`);
+      console.log(`[${name}] acceptedJoinAfterClick=${result.acceptedJoinAfterClick}`);
 
       return result;
     }
@@ -772,29 +832,62 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
       })
       .catch(() => {});
 
-    result.passed = result.videoElementFound && result.clicked && result.timeAdvanced;
+    result.passed =
+      result.videoElementFound &&
+      result.clicked &&
+      result.timeAdvanced;
 
     result.passReason = result.passed
       ? 'video currentTime advanced'
-      : 'video did not play and did not redirect to join';
+      : 'video did not play and click did not redirect/open join';
+
+    console.log(`[${name}] video playerFound=${result.playerFound}`);
+    console.log(`[${name}] video posterFound=${result.posterFound}`);
+    console.log(`[${name}] video playButtonFound=${result.playButtonFound}`);
+    console.log(`[${name}] video videoElementFound=${result.videoElementFound}`);
+    console.log(`[${name}] video fakeThumbFound=${result.fakeThumbFound}`);
+    console.log(`[${name}] video clicked=${result.clicked}`);
+    console.log(`[${name}] video clickedTarget=${result.clickedTarget}`);
+    console.log(`[${name}] video currentTimeBefore=${result.currentTimeBefore}`);
+    console.log(`[${name}] video currentTimeAfter=${result.currentTimeAfter}`);
+    console.log(`[${name}] video timeAdvanced=${result.timeAdvanced}`);
+    console.log(`[${name}] video redirectedToJoin=${result.redirectedToJoin}`);
+    console.log(`[${name}] video joinDetectedBeforeClick=${result.joinDetectedBeforeClick}`);
+    console.log(`[${name}] video joinDetectedAfterClick=${result.joinDetectedAfterClick}`);
+    console.log(`[${name}] video joinFormFound=${result.joinFormFound}`);
+    console.log(`[${name}] video acceptedJoinAfterClick=${result.acceptedJoinAfterClick}`);
+    console.log(`[${name}] video passed=${result.passed}`);
 
     return result;
   } catch (error) {
     result.afterUrl = page.url();
     result.redirectedToJoin = isJoinUrl(result.afterUrl);
-    result.joinFormFound = await pageHasJoinForm(page).catch(() => false);
+    result.joinDetectedAfterClick = await pageHasJoinForm(page).catch(() => false);
 
-    if (result.redirectedToJoin || result.joinFormFound) {
+    result.joinFormFound =
+      result.joinDetectedAfterClick === true &&
+      result.joinDetectedBeforeClick !== true;
+
+    result.acceptedJoinAfterClick =
+      result.clicked === true &&
+      (
+        result.redirectedToJoin === true ||
+        result.joinFormFound === true
+      );
+
+    if (result.acceptedJoinAfterClick) {
       result.passed = true;
       result.passReason = result.redirectedToJoin
         ? 'video click redirected to join page'
         : 'video click opened join form';
       result.error = null;
+
       return result;
     }
 
     result.error = error.message;
     console.log(`[${name}] video check error=${error.message}`);
+
     return result;
   }
 }
