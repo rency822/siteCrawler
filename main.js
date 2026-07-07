@@ -8,14 +8,14 @@ const { geoCheck } = require('./components/geoCheck');
 const { siteCrawler } = require('./components/siteCrawler');
 
 const config = {
-  headless: true,
+  headless: false,
   navigationTimeoutMs: 30000,
   waitAfterLoadMs: 1500,
 
   components: {
     modalKey: {
       enabled: true,
-      timeoutMs: 7000,
+      timeoutMs: 3500,
     },
 
     geoCheck: {
@@ -38,6 +38,7 @@ const config = {
       waitAfterLoadMs: 1000,
       randomSceneCount: 5,
       randomModelCount: 5,
+      randomSitemapLinkCount: 30,
     },
   },
 };
@@ -58,8 +59,12 @@ function summarizeWholeTest(result) {
 
   const testedScenes = siteCrawler?.scenes?.testedItems || [];
   const testedModels = siteCrawler?.models?.testedItems || [];
+
   const brokenScenes = siteCrawler?.scenes?.brokenItems || [];
   const brokenModels = siteCrawler?.models?.brokenItems || [];
+
+  const navigationBrokenLinks = siteCrawler?.navigationCheck?.brokenLinks || [];
+  const sitemapBrokenUrls = siteCrawler?.sitemapCheck?.brokenUrls || [];
 
   const scenePagesPassed = testedScenes.filter((item) => {
     return item.ok === true && item.status === 200 && !item.error;
@@ -72,6 +77,14 @@ function summarizeWholeTest(result) {
   const sceneVideoFailed = testedScenes.filter((item) => {
     return item.videoPlayback && item.videoPlayback.passed !== true;
   }).length;
+
+  const sceneVideoRedirectedToJoin = testedScenes.filter((item) => {
+    return item.videoPlayback?.redirectedToJoin === true;
+  });
+
+  const sceneVideoOpenedJoinForm = testedScenes.filter((item) => {
+    return item.videoPlayback?.joinFormFound === true;
+  });
 
   const modelPagesPassed = testedModels.filter((item) => {
     return item.ok === true && item.status === 200 && !item.error;
@@ -96,6 +109,8 @@ function summarizeWholeTest(result) {
 
   const siteCrawlerPassed =
     !!siteCrawler &&
+    navigationBrokenLinks.length === 0 &&
+    sitemapBrokenUrls.length === 0 &&
     brokenScenes.length === 0 &&
     brokenModels.length === 0 &&
     sceneVideoFailed === 0;
@@ -150,13 +165,98 @@ function summarizeWholeTest(result) {
       ? {
           passed: siteCrawlerPassed,
 
+          sitemap: {
+            report:
+              siteCrawler.sitemapCheck?.reportLine ||
+              `sitemap priority check complete priority=${siteCrawler.sitemapCheck?.priorityLinksChecked || 0} random=${siteCrawler.sitemapCheck?.randomSitemapLinksChecked || 0} broken=${sitemapBrokenUrls.length}`,
+
+            discoveredSitemaps: siteCrawler.sitemapCheck?.discoveredSitemaps || [],
+            urlsFound: siteCrawler.sitemapCheck?.urlsFound || 0,
+            priorityLinksFound: siteCrawler.sitemapCheck?.priorityLinksFound || 0,
+            priorityLinksChecked: siteCrawler.sitemapCheck?.priorityLinksChecked || 0,
+            randomLinksRequested: siteCrawler.sitemapCheck?.randomSitemapLinksRequested || 30,
+            randomLinksChecked: siteCrawler.sitemapCheck?.randomSitemapLinksChecked || 0,
+            urlsChecked: siteCrawler.sitemapCheck?.urlsChecked || 0,
+            passedUrls: siteCrawler.sitemapCheck?.passedUrls || 0,
+            broken: sitemapBrokenUrls.length,
+            brokenUrls: sitemapBrokenUrls.map((item) => ({
+              checkType: item.checkType || null,
+              text: item.text || null,
+              source: item.source || null,
+              url: item.fullUrl || item.url,
+              status: item.status || null,
+              finalUrl: item.fullFinalUrl || item.finalUrl || null,
+              error: item.error || null,
+            })),
+            error: siteCrawler.sitemapCheck?.error || null,
+          },
+
+          navigation: {
+            linksFound: siteCrawler.navigationCheck?.linksFound || 0,
+            linksChecked: siteCrawler.navigationCheck?.linksChecked || 0,
+            passedLinks: siteCrawler.navigationCheck?.passedLinks || 0,
+            broken: navigationBrokenLinks.length,
+            brokenLinks: navigationBrokenLinks.map((item) => ({
+              text: item.text || null,
+              url: item.fullUrl || item.url,
+              selector: item.selector || null,
+              status: item.status || null,
+              finalUrl: item.fullFinalUrl || item.finalUrl || null,
+              error: item.error || null,
+            })),
+            error: siteCrawler.navigationCheck?.error || null,
+          },
+
           scenes: {
             cardsFound: siteCrawler.scenes?.cardsFound || 0,
             tested: testedScenes.length,
             pagesPassed: scenePagesPassed,
             videoPassed: sceneVideoPassed,
             videoFailed: sceneVideoFailed,
+
+            videoRedirectedToJoin: sceneVideoRedirectedToJoin.length,
+            videoOpenedJoinForm: sceneVideoOpenedJoinForm.length,
+
+            videoRedirectedToJoinItems: sceneVideoRedirectedToJoin.map((item) => ({
+              name: item.sourceText || null,
+              url: item.fullUrl || item.url,
+              finalUrl:
+                item.videoPlayback?.afterUrl ||
+                item.fullFinalUrl ||
+                item.finalUrl ||
+                null,
+              passReason: item.videoPlayback?.passReason || null,
+              videoPassed: item.videoPlayback?.passed === true,
+              redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+              joinFormFound: item.videoPlayback?.joinFormFound === true,
+            })),
+
+            videoOpenedJoinFormItems: sceneVideoOpenedJoinForm.map((item) => ({
+              name: item.sourceText || null,
+              url: item.fullUrl || item.url,
+              finalUrl:
+                item.videoPlayback?.afterUrl ||
+                item.fullFinalUrl ||
+                item.finalUrl ||
+                null,
+              passReason: item.videoPlayback?.passReason || null,
+              videoPassed: item.videoPlayback?.passed === true,
+              redirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+              joinFormFound: item.videoPlayback?.joinFormFound === true,
+            })),
+
             broken: brokenScenes.length,
+            brokenItems: brokenScenes.map((item) => ({
+              name: item.sourceText || null,
+              url: item.fullUrl || item.url,
+              status: item.status || null,
+              finalUrl: item.fullFinalUrl || item.finalUrl || null,
+              videoPassed: item.videoPlayback?.passed === true,
+              videoPassReason: item.videoPlayback?.passReason || null,
+              videoRedirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+              joinFormFound: item.videoPlayback?.joinFormFound === true,
+              error: item.error || item.videoPlayback?.error || null,
+            })),
           },
 
           models: {
@@ -164,10 +264,26 @@ function summarizeWholeTest(result) {
             tested: testedModels.length,
             pagesPassed: modelPagesPassed,
             broken: brokenModels.length,
+            brokenItems: brokenModels.map((item) => ({
+              name: item.sourceText || null,
+              url: item.fullUrl || item.url,
+              status: item.status || null,
+              finalUrl: item.fullFinalUrl || item.finalUrl || null,
+              error: item.error || null,
+            })),
           },
 
-          totalTested: testedScenes.length + testedModels.length,
-          totalBroken: brokenScenes.length + brokenModels.length,
+          totalTested:
+            (siteCrawler.navigationCheck?.linksChecked || 0) +
+            (siteCrawler.sitemapCheck?.urlsChecked || 0) +
+            testedScenes.length +
+            testedModels.length,
+
+          totalBroken:
+            navigationBrokenLinks.length +
+            sitemapBrokenUrls.length +
+            brokenScenes.length +
+            brokenModels.length,
         }
       : null,
   };
@@ -317,6 +433,7 @@ async function runFlowForUrl(page, url) {
       waitAfterLoadMs: config.components.siteCrawler.waitAfterLoadMs,
       randomSceneCount: config.components.siteCrawler.randomSceneCount,
       randomModelCount: config.components.siteCrawler.randomModelCount,
+      randomSitemapLinkCount: config.components.siteCrawler.randomSitemapLinkCount,
     });
 
     console.log('[main] siteCrawler completed');

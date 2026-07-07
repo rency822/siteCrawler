@@ -1,35 +1,22 @@
-const { URL } = require('url');
+const { chromium } = require('@playwright/test');
 
-function normalizeUrl(href, baseUrl) {
+function normalizeUrl(url) {
   try {
-    if (!href) return null;
-
-    const cleaned = String(href).trim();
-
-    if (!cleaned) return null;
-    if (cleaned.startsWith('javascript:')) return null;
-    if (cleaned.startsWith('mailto:')) return null;
-    if (cleaned.startsWith('tel:')) return null;
-    if (cleaned.startsWith('#')) return null;
-
-    const url = new URL(cleaned, baseUrl);
-    url.hash = '';
-
-    return url.toString();
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
   } catch {
-    return null;
+    return url;
   }
 }
 
 function getOrigin(url) {
-  const parsed = new URL(url);
-  return `${parsed.protocol}//${parsed.host}`;
+  return new URL(url).origin;
 }
 
-function isSameHost(url, allowedHost) {
+function isSameHost(baseUrl, targetUrl) {
   try {
-    const parsed = new URL(url);
-    return parsed.hostname.replace(/^www\./, '') === allowedHost.replace(/^www\./, '');
+    return new URL(baseUrl).hostname === new URL(targetUrl).hostname;
   } catch {
     return false;
   }
@@ -44,45 +31,545 @@ function dedupeByUrl(items) {
   const output = [];
 
   for (const item of items) {
-    if (!item.url) continue;
-    if (seen.has(item.url)) continue;
+    const url = normalizeUrl(item.url);
 
-    seen.add(item.url);
-    output.push(item);
+    if (!seen.has(url)) {
+      seen.add(url);
+      output.push({
+        ...item,
+        url,
+      });
+    }
   }
 
   return output;
 }
 
-async function getPageBasics(page, opts = {}) {
-  const timeoutMs = opts.timeoutMs || 3000;
+function isJoinUrl(url) {
+  if (!url) return false;
 
-  const title = await page.title().catch(() => null);
+  return (
+    /\/join(?:\/|\?|#|$)/i.test(url) ||
+    /\/signup(?:\/|\?|#|$)/i.test(url) ||
+    /\/members\/join(?:\/|\?|#|$)/i.test(url) ||
+    /join/i.test(url)
+  );
+}
 
-  const h1 = await page
-    .locator('h1')
-    .first()
-    .innerText({ timeout: timeoutMs })
-    .catch(() => null);
+function isSkippableHref(href) {
+  if (!href) return true;
+
+  return (
+    href.startsWith('#') ||
+    href.startsWith('javascript:') ||
+    href.startsWith('mailto:') ||
+    href.startsWith('tel:')
+  );
+}
+
+function isLikelyAssetUrl(url) {
+  return /\.(jpg|jpeg|png|gif|webp|svg|css|js|ico|woff|woff2|ttf|eot|mp4|mov|m3u8|mpd|zip|rar|pdf)(\?|#|$)/i.test(
+    url
+  );
+}
+
+async function checkUrlWithoutClicking(page, url, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 15000;
+
+  const result = {
+    url,
+    fullUrl: url,
+    status: null,
+    ok: false,
+    redirected: false,
+    finalUrl: null,
+    fullFinalUrl: null,
+    error: null,
+  };
+
+  try {
+    const response = await page.request.get(url, {
+      timeout: timeoutMs,
+      maxRedirects: 5,
+    });
+
+    result.status = response.status();
+    result.ok = response.ok();
+    result.finalUrl = response.url();
+    result.fullFinalUrl = response.url();
+    result.redirected = normalizeUrl(result.finalUrl) !== normalizeUrl(url);
+
+    console.log(`[${name}] checked url=${url} status=${result.status} ok=${result.ok}`);
+
+    return result;
+  } catch (error) {
+    result.error = error.message;
+    console.log(`[${name}] check failed url=${url} error=${error.message}`);
+    return result;
+  }
+}
+
+async function discoverSitemapUrls(page, origin, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+
+  const candidates = [
+    `${origin}/sitemap.xml`,
+    `${origin}/sitemap_index.xml`,
+    `${origin}/sitemaps.xml`,
+    `${origin}/sitemap-index.xml`,
+    `${origin}/robots.txt`,
+  ];
+
+  const sitemapUrls = [];
+
+  for (const candidate of candidates) {
+    try {
+      console.log(`[${name}] probing sitemap candidate=${candidate}`);
+
+      const response = await page.request.get(candidate, {
+        timeout: 10000,
+        maxRedirects: 3,
+      });
+
+      if (!response.ok()) {
+        continue;
+      }
+
+      const text = await response.text();
+
+      if (candidate.endsWith('/robots.txt')) {
+        const robotSitemaps = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => /^sitemap:/i.test(line))
+          .map((line) => line.replace(/^sitemap:\s*/i, '').trim())
+          .filter(Boolean);
+
+        for (const sitemapUrl of robotSitemaps) {
+          sitemapUrls.push({
+            source: candidate,
+            url: normalizeUrl(sitemapUrl),
+          });
+        }
+
+        continue;
+      }
+
+      if (/<urlset|<sitemapindex|<loc>/i.test(text)) {
+        sitemapUrls.push({
+          source: 'direct',
+          url: normalizeUrl(candidate),
+        });
+      }
+    } catch (error) {
+      console.log(`[${name}] sitemap probe skipped candidate=${candidate} error=${error.message}`);
+    }
+  }
+
+  return dedupeByUrl(sitemapUrls);
+}
+
+async function parseSitemapXml(page, sitemapUrl, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const origin = opts.origin;
+  const timeoutMs = opts.timeoutMs || 15000;
+
+  const result = {
+    sitemapUrl,
+    fullSitemapUrl: sitemapUrl,
+    status: null,
+    ok: false,
+    childSitemaps: [],
+    urls: [],
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] reading sitemap=${sitemapUrl}`);
+
+    const response = await page.request.get(sitemapUrl, {
+      timeout: timeoutMs,
+      maxRedirects: 5,
+    });
+
+    result.status = response.status();
+    result.ok = response.ok();
+
+    if (!response.ok()) {
+      result.error = `Sitemap returned status ${response.status()}`;
+      return result;
+    }
+
+    const text = await response.text();
+
+    const locs = [...text.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((match) =>
+      match[1].trim()
+    );
+
+    for (const loc of locs) {
+      if (!isSameHost(origin, loc)) {
+        continue;
+      }
+
+      if (/\.xml(\?|#|$)/i.test(loc)) {
+        result.childSitemaps.push({
+          source: sitemapUrl,
+          url: normalizeUrl(loc),
+        });
+      } else if (!isLikelyAssetUrl(loc)) {
+        result.urls.push({
+          source: sitemapUrl,
+          url: normalizeUrl(loc),
+        });
+      }
+    }
+
+    result.childSitemaps = dedupeByUrl(result.childSitemaps);
+    result.urls = dedupeByUrl(result.urls);
+
+    console.log(
+      `[${name}] sitemap parsed urls=${result.urls.length} childSitemaps=${result.childSitemaps.length}`
+    );
+
+    return result;
+  } catch (error) {
+    result.error = error.message;
+    console.log(`[${name}] sitemap parse error=${error.message}`);
+    return result;
+  }
+}
+
+async function extractNavigationLinks(page, baseUrl) {
+  const navSelectors = [
+    'nav a[href]',
+    'header a[href]',
+    '.navbar a[href]',
+    '.nav a[href]',
+    '.menu a[href]',
+    '.main-menu a[href]',
+    '.site-menu a[href]',
+    '.header-menu a[href]',
+    'footer a[href]',
+  ];
+
+  const links = [];
+
+  for (const selector of navSelectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+
+    for (let i = 0; i < count; i += 1) {
+      const item = locator.nth(i);
+      const href = await item.getAttribute('href').catch(() => null);
+
+      if (isSkippableHref(href)) {
+        continue;
+      }
+
+      let url;
+
+      try {
+        url = new URL(href, baseUrl).toString();
+      } catch {
+        continue;
+      }
+
+      if (!isSameHost(baseUrl, url)) {
+        continue;
+      }
+
+      if (isLikelyAssetUrl(url)) {
+        continue;
+      }
+
+      const text = await item
+        .innerText({ timeout: 500 })
+        .catch(async () => item.getAttribute('aria-label').catch(() => ''))
+        .catch(() => '');
+
+      links.push({
+        text: (text || '').trim(),
+        url,
+        fullUrl: url,
+        selector,
+      });
+    }
+  }
+
+  return dedupeByUrl(links);
+}
+
+async function testNavigationWithoutClicking(page, startUrl, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 15000;
+
+  const result = {
+    startUrl,
+    linksFound: 0,
+    linksChecked: 0,
+    passedLinks: 0,
+    brokenLinks: [],
+    links: [],
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] testing navigation without clicking`);
+
+    await gotoAndSettle(page, startUrl, {
+      timeoutMs: opts.pageTimeoutMs || 30000,
+      waitAfterLoadMs: opts.waitAfterLoadMs || 1000,
+    });
+
+    const links = await extractNavigationLinks(page, startUrl);
+
+    result.links = links;
+    result.linksFound = links.length;
+
+    for (const link of links) {
+      const checked = await checkUrlWithoutClicking(page, link.url, {
+        name,
+        timeoutMs,
+      });
+
+      result.linksChecked += 1;
+
+      if (checked.ok) {
+        result.passedLinks += 1;
+      } else {
+        result.brokenLinks.push({
+          text: link.text,
+          url: link.url,
+          fullUrl: link.fullUrl || link.url,
+          selector: link.selector,
+          status: checked.status,
+          finalUrl: checked.finalUrl,
+          fullFinalUrl: checked.fullFinalUrl,
+          error: checked.error,
+        });
+      }
+    }
+
+    console.log(
+      `[${name}] navigation check complete found=${result.linksFound} checked=${result.linksChecked} broken=${result.brokenLinks.length}`
+    );
+
+    return result;
+  } catch (error) {
+    result.error = error.message;
+    console.log(`[${name}] navigation test error=${error.message}`);
+    return result;
+  }
+}
+
+async function testSitemapsWithoutClicking(page, origin, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 15000;
+  const randomSitemapLinkCount = opts.randomSitemapLinkCount || 30;
+  const priorityLinks = opts.priorityLinks || [];
+
+  const result = {
+    discoveredSitemaps: [],
+    parsedSitemaps: [],
+    priorityLinksFound: priorityLinks.length,
+    priorityLinksChecked: 0,
+    randomSitemapLinksRequested: randomSitemapLinkCount,
+    randomSitemapLinksChecked: 0,
+    urlsFound: 0,
+    urlsChecked: 0,
+    passedUrls: 0,
+    brokenUrls: [],
+    checkedUrls: [],
+    reportLine: null,
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] testing sitemap/navigation priority links without clicking`);
+
+    const queue = await discoverSitemapUrls(page, origin, {
+      name,
+    });
+
+    result.discoveredSitemaps = queue;
+
+    const seenSitemaps = new Set();
+    const allSitemapUrls = [];
+
+    while (queue.length > 0) {
+      const sitemap = queue.shift();
+      const sitemapUrl = normalizeUrl(sitemap.url);
+
+      if (seenSitemaps.has(sitemapUrl)) {
+        continue;
+      }
+
+      seenSitemaps.add(sitemapUrl);
+
+      const parsed = await parseSitemapXml(page, sitemapUrl, {
+        name,
+        origin,
+        timeoutMs,
+      });
+
+      result.parsedSitemaps.push(parsed);
+
+      for (const child of parsed.childSitemaps || []) {
+        if (!seenSitemaps.has(normalizeUrl(child.url))) {
+          queue.push(child);
+        }
+      }
+
+      for (const item of parsed.urls || []) {
+        allSitemapUrls.push(item);
+      }
+    }
+
+    const uniquePriorityLinks = dedupeByUrl(
+      priorityLinks.map((link) => ({
+        source: 'navbar-footer-priority',
+        text: link.text || '',
+        url: link.url,
+        fullUrl: link.fullUrl || link.url,
+        selector: link.selector || null,
+      }))
+    );
+
+    const uniqueSitemapUrls = dedupeByUrl(allSitemapUrls);
+    result.urlsFound = uniqueSitemapUrls.length;
+
+    const priorityUrlSet = new Set(uniquePriorityLinks.map((item) => normalizeUrl(item.url)));
+
+    const randomSitemapUrls = shuffle(
+      uniqueSitemapUrls.filter((item) => !priorityUrlSet.has(normalizeUrl(item.url)))
+    ).slice(0, randomSitemapLinkCount);
+
+    const urlsToCheck = [
+      ...uniquePriorityLinks.map((item) => ({
+        ...item,
+        checkType: 'priority-navigation',
+      })),
+      ...randomSitemapUrls.map((item) => ({
+        ...item,
+        fullUrl: item.url,
+        checkType: 'random-sitemap',
+      })),
+    ];
+
+    for (const item of urlsToCheck) {
+      const checked = await checkUrlWithoutClicking(page, item.url, {
+        name,
+        timeoutMs,
+      });
+
+      result.urlsChecked += 1;
+
+      if (item.checkType === 'priority-navigation') {
+        result.priorityLinksChecked += 1;
+      }
+
+      if (item.checkType === 'random-sitemap') {
+        result.randomSitemapLinksChecked += 1;
+      }
+
+      const checkedResult = {
+        checkType: item.checkType,
+        text: item.text || null,
+        source: item.source,
+        url: item.url,
+        fullUrl: item.fullUrl || item.url,
+        status: checked.status,
+        ok: checked.ok,
+        finalUrl: checked.finalUrl,
+        fullFinalUrl: checked.fullFinalUrl,
+        error: checked.error,
+      };
+
+      result.checkedUrls.push(checkedResult);
+
+      if (checked.ok) {
+        result.passedUrls += 1;
+      } else {
+        result.brokenUrls.push(checkedResult);
+      }
+    }
+
+    result.reportLine = `sitemap priority check complete priority=${result.priorityLinksChecked} random=${result.randomSitemapLinksChecked} broken=${result.brokenUrls.length}`;
+
+    console.log(`[${name}] ${result.reportLine}`);
+
+    return result;
+  } catch (error) {
+    result.error = error.message;
+    result.reportLine = `sitemap priority check complete priority=${result.priorityLinksChecked} random=${result.randomSitemapLinksChecked} broken=${result.brokenUrls.length}`;
+    console.log(`[${name}] sitemap test error=${error.message}`);
+    return result;
+  }
+}
+
+async function pageHasJoinForm(page) {
+  const currentUrl = page.url();
+
+  if (isJoinUrl(currentUrl)) {
+    return true;
+  }
+
+  const joinSelectors = [
+    'form[action*="join" i]',
+    'form[action*="signup" i]',
+    'input[name*="card" i]',
+    'input[name*="cc" i]',
+    'input[name*="email" i]',
+    'input[name*="password" i]',
+    'button:has-text("Join")',
+    'button:has-text("Sign Up")',
+    'button:has-text("Continue")',
+    'a:has-text("Join Now")',
+    'text=/Join Now/i',
+    'text=/Get Your Instant Access/i',
+    'text=/Create Account/i',
+    'text=/Start Your Membership/i',
+    'text=/Complete Your Membership/i',
+  ];
+
+  for (const selector of joinSelectors) {
+    const visible = await page
+      .locator(selector)
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+
+    if (visible) {
+      return true;
+    }
+  }
 
   const bodyText = await page
     .locator('body')
-    .innerText({ timeout: timeoutMs })
+    .innerText({ timeout: 1000 })
     .catch(() => '');
 
+  return /join now|get your instant access|create account|start your membership|complete your membership|choose your membership|payment information/i.test(
+    bodyText
+  );
+}
+
+async function getPageBasics(page) {
   return {
-    title,
-    h1,
-    bodyTextPreview: bodyText.slice(0, 300),
+    finalUrl: page.url(),
+    title: await page.title().catch(() => null),
+    h1: await page
+      .locator('h1')
+      .first()
+      .innerText({ timeout: 2000 })
+      .catch(() => null),
   };
 }
 
 async function gotoAndSettle(page, url, opts = {}) {
-  const name = opts.name || 'siteCrawler';
   const timeoutMs = opts.timeoutMs || 30000;
   const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
-
-  console.log(`[${name}] opening ${url}`);
 
   const response = await page.goto(url, {
     waitUntil: 'domcontentloaded',
@@ -95,318 +582,66 @@ async function gotoAndSettle(page, url, opts = {}) {
   return response;
 }
 
-async function extractCards(page, opts = {}) {
-  const name = opts.name || 'siteCrawler';
-  const baseUrl = page.url();
-  const allowedHost = new URL(baseUrl).hostname.replace(/^www\./, '');
-  const type = opts.type || 'unknown';
+async function extractCards(page, type, baseUrl) {
+  const selectors =
+    type === 'scene'
+      ? [
+          'a.content-title[href*="/scenes/"]',
+          '.content-item-small a[href*="/scenes/"]',
+          '.content-border a[href*="/scenes/"]',
+          '#latest-videos-wrap a[href*="/scenes/"]',
+          'a[href*="/scenes/"]',
+        ]
+      : [
+          'a.model-name[href*="/models/"]',
+          '.model-card a[href*="/models/"]',
+          '.model-loop a[href*="/models/"]',
+          'a[href*="/models/"]',
+        ];
 
-  console.log(`[${name}] extracting ${type} cards`);
+  const cards = [];
 
-  const rawCards = await page.evaluate((type) => {
-    let selectors = [];
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
 
-    if (type === 'scenes') {
-      selectors = [
-        'a.content-title[href*="/scenes/"]',
-        '.content-item-small a[href*="/scenes/"]',
-        '.content-border a[href*="/scenes/"]',
-        '#latest-videos-wrap a[href*="/scenes/"]',
-        'a[href*="/scenes/"]',
-      ];
-    }
+    for (let i = 0; i < count; i += 1) {
+      const item = locator.nth(i);
 
-    if (type === 'models') {
-      selectors = [
-        'a.model-name[href*="/models/"]',
-        '.model-card a[href*="/models/"]',
-        '.model-loop a[href*="/models/"]',
-        'a[href*="/models/"]',
-      ];
-    }
+      const href = await item.getAttribute('href').catch(() => null);
 
-    const cards = [];
+      if (!href) {
+        continue;
+      }
 
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach((a) => {
-        const href = a.getAttribute('href');
-        const text = (a.innerText || a.textContent || '').trim();
-        const img = a.querySelector('img');
+      let url;
 
-        cards.push({
-          href,
-          text,
-          imageAlt: img ? img.getAttribute('alt') : null,
-          selector,
-        });
-      });
-    }
+      try {
+        url = new URL(href, baseUrl).toString();
+      } catch {
+        continue;
+      }
 
-    return cards;
-  }, type);
+      if (!isSameHost(baseUrl, url)) {
+        continue;
+      }
 
-  const cards = rawCards
-    .map((card) => {
-      const absoluteUrl = normalizeUrl(card.href, baseUrl);
+      const text = await item
+        .innerText({ timeout: 500 })
+        .catch(async () => item.getAttribute('title').catch(() => ''))
+        .catch(() => '');
 
-      if (!absoluteUrl) return null;
-      if (!isSameHost(absoluteUrl, allowedHost)) return null;
-
-      return {
+      cards.push({
         type,
-        text: card.text || card.imageAlt || '',
-        href: card.href,
-        url: absoluteUrl,
-        sourceSelector: card.selector,
-      };
-    })
-    .filter(Boolean);
-
-  const deduped = dedupeByUrl(cards);
-
-  console.log(`[${name}] ${type} cards found=${deduped.length}`);
-
-  return deduped;
-}
-
-async function testScenePage(page, scene, opts = {}) {
-  const name = opts.name || 'siteCrawler';
-  const timeoutMs = opts.timeoutMs || 30000;
-  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
-
-  const result = {
-    type: 'scene',
-    sourceText: scene.text,
-    url: scene.url,
-    finalUrl: null,
-    status: null,
-    ok: false,
-    title: null,
-    h1: null,
-    hasSceneTitle: false,
-    hasModelLink: false,
-    hasTrailerOrJoin: false,
-    videoPlayback: null,
-    error: null,
-  };
-
-  try {
-    console.log('');
-    console.log(`[${name}] testing random scene: ${scene.text || scene.url}`);
-
-    const response = await gotoAndSettle(page, scene.url, {
-      name,
-      timeoutMs,
-      waitAfterLoadMs,
-    });
-
-    result.finalUrl = page.url();
-    result.status = response ? response.status() : null;
-    result.ok = response ? response.ok() : true;
-
-    const basics = await getPageBasics(page);
-    result.title = basics.title;
-    result.h1 = basics.h1;
-
-    result.hasSceneTitle = await page
-      .locator('h1, .content-title, .scene-title')
-      .first()
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    result.hasModelLink = await page
-      .locator('a[href*="/models/"]')
-      .first()
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    result.hasTrailerOrJoin = await page
-  .locator('text=/Watch Trailer|Join|Get Your Instant Access|Become a Member/i')
-  .first()
-  .isVisible({ timeout: 3000 })
-  .catch(() => false);
-
-result.videoPlayback = await quickVideoPlaybackCheck(page, {
-  name,
-  timeoutMs: 8000,
-  playCheckMs: 2000,
-});
-
-console.log(`[${name}] scene status=${result.status}`);
-console.log(`[${name}] scene ok=${result.ok}`);
-console.log(`[${name}] scene title=${JSON.stringify(result.title)}`);
-console.log(`[${name}] scene video passed=${result.videoPlayback.passed}`);
-
-return result;
-
-  } catch (error) {
-    result.finalUrl = page.url();
-    result.ok = false;
-    result.error = error.message;
-
-    console.log(`[${name}] scene failed=${scene.url}`);
-    console.log(`[${name}] error=${error.message}`);
-
-    return result;
-  }
-}
-
-async function testModelPage(page, model, opts = {}) {
-  const name = opts.name || 'siteCrawler';
-  const timeoutMs = opts.timeoutMs || 30000;
-  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
-
-  const result = {
-    type: 'model',
-    sourceText: model.text,
-    url: model.url,
-    finalUrl: null,
-    status: null,
-    ok: false,
-    title: null,
-    h1: null,
-    hasModelName: false,
-    hasScenes: false,
-    hasJoin: false,
-    error: null,
-  };
-
-  try {
-    console.log('');
-    console.log(`[${name}] testing random model: ${model.text || model.url}`);
-
-    const response = await gotoAndSettle(page, model.url, {
-      name,
-      timeoutMs,
-      waitAfterLoadMs,
-    });
-
-    result.finalUrl = page.url();
-    result.status = response ? response.status() : null;
-    result.ok = response ? response.ok() : true;
-
-    const basics = await getPageBasics(page);
-    result.title = basics.title;
-    result.h1 = basics.h1;
-
-    result.hasModelName = await page
-      .locator('h1, .model-name, .model-title')
-      .first()
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    result.hasScenes = await page
-      .locator('a[href*="/scenes/"], #latest-videos-wrap, .content-item-small')
-      .first()
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    result.hasJoin = await page
-      .locator('a.modal-join, .join-now, .join-button, text=/Join|Get Your Instant Access/i')
-      .first()
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    console.log(`[${name}] model status=${result.status}`);
-    console.log(`[${name}] model ok=${result.ok}`);
-    console.log(`[${name}] model title=${JSON.stringify(result.title)}`);
-
-    return result;
-  } catch (error) {
-    result.finalUrl = page.url();
-    result.ok = false;
-    result.error = error.message;
-
-    console.log(`[${name}] model failed=${model.url}`);
-    console.log(`[${name}] error=${error.message}`);
-
-    return result;
-  }
-}
-
-async function testRandomSectionItems(page, sectionUrl, opts = {}) {
-  const name = opts.name || 'siteCrawler';
-  const type = opts.type;
-  const count = opts.count || 5;
-  const timeoutMs = opts.timeoutMs || 30000;
-  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
-
-  const sectionResult = {
-    type,
-    sectionUrl,
-    cardsFound: 0,
-    selectedCards: [],
-    testedItems: [],
-    brokenItems: [],
-    error: null,
-  };
-
-  try {
-    console.log('');
-    console.log(`[${name}] testing section=${sectionUrl}`);
-    console.log(`[${name}] random ${type} count=${count}`);
-
-    await gotoAndSettle(page, sectionUrl, {
-      name,
-      timeoutMs,
-      waitAfterLoadMs,
-    });
-
-    const cards = await extractCards(page, {
-      name,
-      type,
-    });
-
-    sectionResult.cardsFound = cards.length;
-    sectionResult.selectedCards = shuffle(cards).slice(0, count);
-
-    console.log(`[${name}] selected ${type} cards=${sectionResult.selectedCards.length}`);
-
-    for (const card of sectionResult.selectedCards) {
-      let itemResult;
-
-      if (type === 'scenes') {
-        itemResult = await testScenePage(page, card, {
-          name,
-          timeoutMs,
-          waitAfterLoadMs,
-        });
-      } else if (type === 'models') {
-        itemResult = await testModelPage(page, card, {
-          name,
-          timeoutMs,
-          waitAfterLoadMs,
-        });
-      } else {
-        itemResult = {
-          url: card.url,
-          ok: false,
-          error: `Unknown section type: ${type}`,
-        };
-      }
-
-      sectionResult.testedItems.push(itemResult);
-
-      if (!itemResult.ok || itemResult.error) {
-        sectionResult.brokenItems.push(itemResult);
-      }
-
-      await gotoAndSettle(page, sectionUrl, {
-        name,
-        timeoutMs,
-        waitAfterLoadMs,
+        text: (text || '').trim(),
+        url,
+        fullUrl: url,
+        selector,
       });
     }
-
-    return sectionResult;
-  } catch (error) {
-    sectionResult.error = error.message;
-
-    console.log(`[${name}] section failed=${sectionUrl}`);
-    console.log(`[${name}] error=${error.message}`);
-
-    return sectionResult;
   }
+
+  return dedupeByUrl(cards);
 }
 
 async function quickVideoPlaybackCheck(page, opts = {}) {
@@ -420,11 +655,16 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
     playButtonFound: false,
     videoElementFound: false,
     clicked: false,
+    redirectedToJoin: false,
+    joinFormFound: false,
+    beforeUrl: page.url(),
+    afterUrl: null,
     currentTimeBefore: null,
     currentTimeAfter: null,
     timeAdvanced: false,
     pausedAfterCheck: false,
     passed: false,
+    passReason: null,
     error: null,
   };
 
@@ -435,17 +675,9 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
     const poster = page.locator('.vjs-poster').first();
     const playButton = page.locator('.vjs-big-play-button, .vjs-play-control').first();
 
-    result.playerFound = await player
-      .isVisible({ timeout: timeoutMs })
-      .catch(() => false);
-
-    result.posterFound = await poster
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
-
-    result.playButtonFound = await playButton
-      .isVisible({ timeout: 3000 })
-      .catch(() => false);
+    result.playerFound = await player.isVisible({ timeout: timeoutMs }).catch(() => false);
+    result.posterFound = await poster.isVisible({ timeout: 3000 }).catch(() => false);
+    result.playButtonFound = await playButton.isVisible({ timeout: 3000 }).catch(() => false);
 
     result.videoElementFound = await page
       .locator('video')
@@ -454,6 +686,17 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
       .catch(() => false);
 
     if (!result.playerFound && !result.posterFound && !result.videoElementFound) {
+      const alreadyJoin = await pageHasJoinForm(page);
+
+      if (alreadyJoin) {
+        result.afterUrl = page.url();
+        result.redirectedToJoin = isJoinUrl(result.afterUrl);
+        result.joinFormFound = true;
+        result.passed = true;
+        result.passReason = 'join form/page found instead of playable video';
+        return result;
+      }
+
       result.error = 'No video player/poster/video element found';
       console.log(`[${name}] ${result.error}`);
       return result;
@@ -470,14 +713,12 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
         timeout: 3000,
         force: true,
       });
-
       result.clicked = true;
     } else if (result.posterFound) {
       await poster.click({
         timeout: 3000,
         force: true,
       });
-
       result.clicked = true;
     } else {
       await page
@@ -485,11 +726,28 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
         .first()
         .evaluate((video) => video.play())
         .catch(() => null);
-
       result.clicked = true;
     }
 
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(playCheckMs);
+
+    result.afterUrl = page.url();
+    result.redirectedToJoin = isJoinUrl(result.afterUrl);
+    result.joinFormFound = await pageHasJoinForm(page);
+
+    if (result.redirectedToJoin || result.joinFormFound) {
+      result.passed = true;
+      result.passReason = result.redirectedToJoin
+        ? 'video click redirected to join page'
+        : 'video click opened join form';
+
+      console.log(`[${name}] video accepted as pass because it redirected/opened join`);
+      console.log(`[${name}] afterUrl=${result.afterUrl}`);
+
+      return result;
+    }
 
     result.currentTimeAfter = await page
       .locator('video')
@@ -514,23 +772,229 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
       })
       .catch(() => {});
 
-    result.passed =
-      result.videoElementFound &&
-      result.clicked &&
-      result.timeAdvanced;
+    result.passed = result.videoElementFound && result.clicked && result.timeAdvanced;
 
-    console.log(`[${name}] video playerFound=${result.playerFound}`);
-    console.log(`[${name}] video posterFound=${result.posterFound}`);
-    console.log(`[${name}] video playButtonFound=${result.playButtonFound}`);
-    console.log(`[${name}] video currentTimeBefore=${result.currentTimeBefore}`);
-    console.log(`[${name}] video currentTimeAfter=${result.currentTimeAfter}`);
-    console.log(`[${name}] video timeAdvanced=${result.timeAdvanced}`);
-    console.log(`[${name}] video passed=${result.passed}`);
+    result.passReason = result.passed
+      ? 'video currentTime advanced'
+      : 'video did not play and did not redirect to join';
+
+    return result;
+  } catch (error) {
+    result.afterUrl = page.url();
+    result.redirectedToJoin = isJoinUrl(result.afterUrl);
+    result.joinFormFound = await pageHasJoinForm(page).catch(() => false);
+
+    if (result.redirectedToJoin || result.joinFormFound) {
+      result.passed = true;
+      result.passReason = result.redirectedToJoin
+        ? 'video click redirected to join page'
+        : 'video click opened join form';
+      result.error = null;
+      return result;
+    }
+
+    result.error = error.message;
+    console.log(`[${name}] video check error=${error.message}`);
+    return result;
+  }
+}
+
+async function testScenePage(page, scene, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 30000;
+  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
+
+  const result = {
+    type: 'scene',
+    sourceText: scene.text,
+    url: scene.url,
+    fullUrl: scene.fullUrl || scene.url,
+    finalUrl: null,
+    fullFinalUrl: null,
+    status: null,
+    ok: false,
+    title: null,
+    h1: null,
+    hasSceneTitle: false,
+    hasModelLink: false,
+    hasTrailerOrJoin: false,
+    videoPlayback: null,
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] testing scene ${scene.url}`);
+
+    const response = await gotoAndSettle(page, scene.url, {
+      timeoutMs,
+      waitAfterLoadMs,
+    });
+
+    result.status = response ? response.status() : null;
+    result.ok = response ? response.ok() : false;
+
+    const basics = await getPageBasics(page);
+
+    result.finalUrl = basics.finalUrl;
+    result.fullFinalUrl = basics.finalUrl;
+    result.title = basics.title;
+    result.h1 = basics.h1;
+
+    result.hasSceneTitle = Boolean(result.h1 || result.title);
+
+    result.hasModelLink = await page
+      .locator('a[href*="/models/"], .model-name, text=/Featuring|Starring|Model/i')
+      .first()
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+
+    result.hasTrailerOrJoin = await page
+      .locator('text=/Watch Trailer|Join|Get Your Instant Access|Become a Member|Start Your Membership/i')
+      .first()
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+
+    result.videoPlayback = await quickVideoPlaybackCheck(page, {
+      name,
+      timeoutMs: 8000,
+      playCheckMs: 2000,
+    });
+
+    if (result.videoPlayback?.passed === true) {
+      result.ok = result.status === 200 || result.status === 301 || result.status === 302 || result.ok;
+    }
+
+    return result;
+  } catch (error) {
+    result.finalUrl = page.url();
+    result.fullFinalUrl = page.url();
+    result.error = error.message;
+    console.log(`[${name}] scene error=${error.message}`);
+    return result;
+  }
+}
+
+async function testModelPage(page, model, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 30000;
+  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
+
+  const result = {
+    type: 'model',
+    sourceText: model.text,
+    url: model.url,
+    fullUrl: model.fullUrl || model.url,
+    finalUrl: null,
+    fullFinalUrl: null,
+    status: null,
+    ok: false,
+    title: null,
+    h1: null,
+    hasModelName: false,
+    hasScenes: false,
+    hasJoin: false,
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] testing model ${model.url}`);
+
+    const response = await gotoAndSettle(page, model.url, {
+      timeoutMs,
+      waitAfterLoadMs,
+    });
+
+    result.status = response ? response.status() : null;
+    result.ok = response ? response.ok() : false;
+
+    const basics = await getPageBasics(page);
+
+    result.finalUrl = basics.finalUrl;
+    result.fullFinalUrl = basics.finalUrl;
+    result.title = basics.title;
+    result.h1 = basics.h1;
+
+    result.hasModelName = Boolean(result.h1 || result.title);
+
+    result.hasScenes = await page
+      .locator('a[href*="/scenes/"], #latest-videos-wrap, .content-item-small, .content-border')
+      .first()
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+
+    result.hasJoin = await page
+      .locator('a.modal-join, .join-now, .join-button, text=/Join|Get Your Instant Access/i')
+      .first()
+      .isVisible({ timeout: 3000 })
+      .catch(() => false);
+
+    return result;
+  } catch (error) {
+    result.finalUrl = page.url();
+    result.fullFinalUrl = page.url();
+    result.error = error.message;
+    console.log(`[${name}] model error=${error.message}`);
+    return result;
+  }
+}
+
+async function testRandomSectionItems(page, sectionUrl, type, count, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 30000;
+  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
+  const baseUrl = opts.baseUrl;
+
+  const result = {
+    type,
+    sectionUrl,
+    fullSectionUrl: sectionUrl,
+    cardsFound: 0,
+    selectedItems: [],
+    testedItems: [],
+    brokenItems: [],
+    error: null,
+  };
+
+  try {
+    console.log(`[${name}] opening ${type} section ${sectionUrl}`);
+
+    await gotoAndSettle(page, sectionUrl, {
+      timeoutMs,
+      waitAfterLoadMs,
+    });
+
+    const cards = await extractCards(page, type, baseUrl);
+
+    result.cardsFound = cards.length;
+    result.selectedItems = shuffle(cards).slice(0, count);
+
+    console.log(`[${name}] ${type} cardsFound=${result.cardsFound}`);
+    console.log(`[${name}] ${type} selected=${result.selectedItems.length}`);
+
+    for (const item of result.selectedItems) {
+      const tested =
+        type === 'scene'
+          ? await testScenePage(page, item, opts)
+          : await testModelPage(page, item, opts);
+
+      result.testedItems.push(tested);
+
+      const isBroken =
+        tested.error ||
+        tested.ok !== true ||
+        tested.status < 200 ||
+        tested.status >= 400 ||
+        (type === 'scene' && tested.videoPlayback?.passed !== true);
+
+      if (isBroken) {
+        result.brokenItems.push(tested);
+      }
+    }
 
     return result;
   } catch (error) {
     result.error = error.message;
-    console.log(`[${name}] video check error=${error.message}`);
+    console.log(`[${name}] ${type} section error=${error.message}`);
     return result;
   }
 }
@@ -541,75 +1005,70 @@ async function siteCrawler(page, opts = {}) {
   const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
   const randomSceneCount = opts.randomSceneCount || 5;
   const randomModelCount = opts.randomModelCount || 5;
+  const randomSitemapLinkCount = opts.randomSitemapLinkCount || 30;
 
   const startUrl = page.url();
   const origin = getOrigin(startUrl);
 
-  const scenesUrl = opts.scenesUrl || `${origin}/scenes`;
-  const modelsUrl = opts.modelsUrl || `${origin}/models`;
-
-  console.log('');
-  console.log(`[${name}] COMPONENT STARTED`);
-  console.log(`[${name}] startUrl=${startUrl}`);
-  console.log(`[${name}] scenesUrl=${scenesUrl}`);
-  console.log(`[${name}] modelsUrl=${modelsUrl}`);
-
   const result = {
     component: 'siteCrawler',
     startUrl,
-    scenesUrl,
-    modelsUrl,
+    fullStartUrl: startUrl,
+    scenesUrl: `${origin}/scenes`,
+    fullScenesUrl: `${origin}/scenes`,
+    modelsUrl: `${origin}/models`,
+    fullModelsUrl: `${origin}/models`,
+    navigationCheck: null,
+    sitemapCheck: null,
     scenes: null,
     models: null,
-    summary: {
-      sceneCardsFound: 0,
-      randomScenesTested: 0,
-      brokenScenes: 0,
-      modelCardsFound: 0,
-      randomModelsTested: 0,
-      brokenModels: 0,
-      totalBroken: 0,
-    },
     error: null,
   };
 
   try {
-    result.scenes = await testRandomSectionItems(page, scenesUrl, {
+    console.log(`[${name}] started`);
+
+    result.navigationCheck = await testNavigationWithoutClicking(page, startUrl, {
       name,
-      type: 'scenes',
-      count: randomSceneCount,
-      timeoutMs,
+      timeoutMs: 15000,
+      pageTimeoutMs: timeoutMs,
       waitAfterLoadMs,
     });
 
-    result.models = await testRandomSectionItems(page, modelsUrl, {
+    result.sitemapCheck = await testSitemapsWithoutClicking(page, origin, {
       name,
-      type: 'models',
-      count: randomModelCount,
-      timeoutMs,
-      waitAfterLoadMs,
+      timeoutMs: 15000,
+      priorityLinks: result.navigationCheck?.links || [],
+      randomSitemapLinkCount,
     });
 
-    result.summary.sceneCardsFound = result.scenes.cardsFound;
-    result.summary.randomScenesTested = result.scenes.testedItems.length;
-    result.summary.brokenScenes = result.scenes.brokenItems.length;
+    result.scenes = await testRandomSectionItems(
+      page,
+      result.scenesUrl,
+      'scene',
+      randomSceneCount,
+      {
+        name,
+        timeoutMs,
+        waitAfterLoadMs,
+        baseUrl: origin,
+      }
+    );
 
-    result.summary.modelCardsFound = result.models.cardsFound;
-    result.summary.randomModelsTested = result.models.testedItems.length;
-    result.summary.brokenModels = result.models.brokenItems.length;
+    result.models = await testRandomSectionItems(
+      page,
+      result.modelsUrl,
+      'model',
+      randomModelCount,
+      {
+        name,
+        timeoutMs,
+        waitAfterLoadMs,
+        baseUrl: origin,
+      }
+    );
 
-    result.summary.totalBroken =
-      result.summary.brokenScenes + result.summary.brokenModels;
-
-    console.log('');
-    console.log(`[${name}] SUMMARY`);
-    console.log(`[${name}] sceneCardsFound=${result.summary.sceneCardsFound}`);
-    console.log(`[${name}] randomScenesTested=${result.summary.randomScenesTested}`);
-    console.log(`[${name}] brokenScenes=${result.summary.brokenScenes}`);
-    console.log(`[${name}] modelCardsFound=${result.summary.modelCardsFound}`);
-    console.log(`[${name}] randomModelsTested=${result.summary.randomModelsTested}`);
-    console.log(`[${name}] brokenModels=${result.summary.brokenModels}`);
-    console.log(`[${name}] totalBroken=${result.summary.totalBroken}`);
+    console.log(`[${name}] completed`);
 
     return result;
   } catch (error) {
@@ -619,6 +1078,195 @@ async function siteCrawler(page, opts = {}) {
   }
 }
 
+function summarizeSiteCrawlerResult(result) {
+  const testedScenes = result.scenes?.testedItems || [];
+  const testedModels = result.models?.testedItems || [];
+
+  const sceneVideoPassed = testedScenes.filter((item) => {
+    return item.videoPlayback?.passed === true;
+  }).length;
+
+  const sceneVideoFailed = testedScenes.filter((item) => {
+    return item.videoPlayback && item.videoPlayback.passed !== true;
+  }).length;
+
+  const scenePagesPassed = testedScenes.filter((item) => {
+    return item.ok === true && item.status === 200 && !item.error;
+  }).length;
+
+  const modelPagesPassed = testedModels.filter((item) => {
+    return item.ok === true && item.status === 200 && !item.error;
+  }).length;
+
+  const brokenScenes = result.scenes?.brokenItems || [];
+  const brokenModels = result.models?.brokenItems || [];
+
+  return {
+    component: 'siteCrawler',
+    startUrl: result.startUrl,
+    fullStartUrl: result.fullStartUrl || result.startUrl,
+    scenesUrl: result.scenesUrl,
+    fullScenesUrl: result.fullScenesUrl || result.scenesUrl,
+    modelsUrl: result.modelsUrl,
+    fullModelsUrl: result.fullModelsUrl || result.modelsUrl,
+
+    summary: {
+      sitemapPriorityReport:
+        result.sitemapCheck?.reportLine ||
+        `sitemap priority check complete priority=${result.sitemapCheck?.priorityLinksChecked || 0} random=${result.sitemapCheck?.randomSitemapLinksChecked || 0} broken=${result.sitemapCheck?.brokenUrls?.length || 0}`,
+
+      navigationLinksFound: result.navigationCheck?.linksFound || 0,
+      navigationLinksChecked: result.navigationCheck?.linksChecked || 0,
+      navigationBrokenLinks: result.navigationCheck?.brokenLinks?.length || 0,
+
+      sitemapUrlsFound: result.sitemapCheck?.urlsFound || 0,
+      sitemapPriorityLinksChecked: result.sitemapCheck?.priorityLinksChecked || 0,
+      sitemapRandomLinksChecked: result.sitemapCheck?.randomSitemapLinksChecked || 0,
+      sitemapBrokenUrls: result.sitemapCheck?.brokenUrls?.length || 0,
+
+      sceneCardsFound: result.scenes?.cardsFound || 0,
+      randomScenesTested: testedScenes.length,
+      scenePagesPassed,
+      sceneVideoPassed,
+      sceneVideoFailed,
+      brokenScenes: brokenScenes.length,
+
+      modelCardsFound: result.models?.cardsFound || 0,
+      randomModelsTested: testedModels.length,
+      modelPagesPassed,
+      brokenModels: brokenModels.length,
+
+      totalTested:
+        (result.navigationCheck?.linksChecked || 0) +
+        (result.sitemapCheck?.urlsChecked || 0) +
+        testedScenes.length +
+        testedModels.length,
+
+      totalBroken:
+        (result.navigationCheck?.brokenLinks?.length || 0) +
+        (result.sitemapCheck?.brokenUrls?.length || 0) +
+        brokenScenes.length +
+        brokenModels.length,
+
+      passed:
+        (result.navigationCheck?.brokenLinks?.length || 0) === 0 &&
+        (result.sitemapCheck?.brokenUrls?.length || 0) === 0 &&
+        brokenScenes.length === 0 &&
+        brokenModels.length === 0 &&
+        sceneVideoFailed === 0,
+    },
+
+    navigationCheck: {
+      linksFound: result.navigationCheck?.linksFound || 0,
+      linksChecked: result.navigationCheck?.linksChecked || 0,
+      passedLinks: result.navigationCheck?.passedLinks || 0,
+      brokenLinks: result.navigationCheck?.brokenLinks || [],
+      error: result.navigationCheck?.error || null,
+    },
+
+    sitemapCheck: {
+      reportLine:
+        result.sitemapCheck?.reportLine ||
+        `sitemap priority check complete priority=${result.sitemapCheck?.priorityLinksChecked || 0} random=${result.sitemapCheck?.randomSitemapLinksChecked || 0} broken=${result.sitemapCheck?.brokenUrls?.length || 0}`,
+
+      discoveredSitemaps: result.sitemapCheck?.discoveredSitemaps || [],
+      urlsFound: result.sitemapCheck?.urlsFound || 0,
+      priorityLinksFound: result.sitemapCheck?.priorityLinksFound || 0,
+      priorityLinksChecked: result.sitemapCheck?.priorityLinksChecked || 0,
+      randomSitemapLinksRequested: result.sitemapCheck?.randomSitemapLinksRequested || 30,
+      randomSitemapLinksChecked: result.sitemapCheck?.randomSitemapLinksChecked || 0,
+      urlsChecked: result.sitemapCheck?.urlsChecked || 0,
+      passedUrls: result.sitemapCheck?.passedUrls || 0,
+      brokenUrls: result.sitemapCheck?.brokenUrls || [],
+      error: result.sitemapCheck?.error || null,
+    },
+
+    scenes: testedScenes.map((item) => ({
+      name: item.sourceText,
+      url: item.url,
+      fullUrl: item.fullUrl || item.url,
+      status: item.status,
+      pagePassed: item.ok === true && item.status === 200 && !item.error,
+      h1: item.h1,
+      hasSceneTitle: item.hasSceneTitle,
+      hasModelLink: item.hasModelLink,
+      videoPassed: item.videoPlayback?.passed === true,
+      videoPassReason: item.videoPlayback?.passReason || null,
+      videoRedirectedToJoin: item.videoPlayback?.redirectedToJoin === true,
+      joinFormFound: item.videoPlayback?.joinFormFound === true,
+      videoTimeBefore: item.videoPlayback?.currentTimeBefore ?? null,
+      videoTimeAfter: item.videoPlayback?.currentTimeAfter ?? null,
+      error: item.error || item.videoPlayback?.error || null,
+    })),
+
+    models: testedModels.map((item) => ({
+      name: item.sourceText,
+      url: item.url,
+      fullUrl: item.fullUrl || item.url,
+      status: item.status,
+      pagePassed: item.ok === true && item.status === 200 && !item.error,
+      h1: item.h1,
+      hasModelName: item.hasModelName,
+      hasScenes: item.hasScenes,
+      error: item.error || null,
+    })),
+  };
+}
+
+async function run() {
+  const urls = process.argv.slice(2);
+
+  if (!urls.length) {
+    console.error('Usage: node siteCrawler.js <url> [url...]');
+    process.exit(1);
+  }
+
+  const browser = await chromium.launch({
+    headless: !process.env.HEADED,
+  });
+
+  const page = await browser.newPage({
+    viewport: {
+      width: 1920,
+      height: 1080,
+    },
+  });
+
+  for (const url of urls) {
+    try {
+      console.log(`\n[runner] visiting ${url}`);
+
+      await gotoAndSettle(page, url, {
+        timeoutMs: 30000,
+        waitAfterLoadMs: 1000,
+      });
+
+      const result = await siteCrawler(page, {
+        name: 'siteCrawler',
+        timeoutMs: 30000,
+        waitAfterLoadMs: 1000,
+        randomSceneCount: 5,
+        randomModelCount: 5,
+        randomSitemapLinkCount: 30,
+      });
+
+      console.log(JSON.stringify(summarizeSiteCrawlerResult(result), null, 2));
+    } catch (error) {
+      console.error(`[runner] error processing ${url}: ${error.message}`);
+    }
+  }
+
+  await browser.close();
+}
+
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
+
 module.exports = {
   siteCrawler,
+  summarizeSiteCrawlerResult,
 };

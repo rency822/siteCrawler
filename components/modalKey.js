@@ -4,7 +4,7 @@ const DEFAULT_ENTER_PATTERNS = [
   /\benter\b/i,
   /^(continue|proceed|okay|ok|yes|i agree)$/i,
   /^(start|watch now)$/i,
-   /^(click to enter|enter here|enter|i agree let me enter)$/i,
+  /^(click to enter|enter here|enter|i agree let me enter)$/i,
 ];
 
 const DEFAULT_MODAL_PATTERNS = [
@@ -57,7 +57,7 @@ async function inferModalFromSignals(page, name) {
     try {
       const signal = page.locator(selector).first();
 
-      if (await signal.isVisible({ timeout: 700 })) {
+      if (await signal.isVisible({ timeout: 250 })) {
         console.log(`[${name}] modal inferred from visible signal selector=${selector}`);
         return true;
       }
@@ -67,11 +67,11 @@ async function inferModalFromSignals(page, name) {
   return false;
 }
 
-async function clickAgeVerificationModal(page, name, timeoutMs) {
+async function clickAgeVerificationModal(page, name, clickTimeoutMs, clearTimeoutMs) {
   const modal = page.locator('#ageVerificationModal').first();
 
   try {
-    const modalVisible = await modal.isVisible({ timeout: 1500 }).catch(() => false);
+    const modalVisible = await modal.isVisible({ timeout: 300 }).catch(() => false);
 
     if (!modalVisible) {
       return false;
@@ -90,7 +90,7 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
       )
       .first();
 
-    const buttonVisible = await enterButton.isVisible({ timeout: 2000 }).catch(() => false);
+    const buttonVisible = await enterButton.isVisible({ timeout: 300 }).catch(() => false);
 
     if (!buttonVisible) {
       console.log(`[${name}] #ageVerificationModal found but enter button not visible`);
@@ -106,7 +106,7 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
     );
 
     await enterButton.click({
-      timeout: timeoutMs,
+      timeout: clickTimeoutMs,
       force: true,
     });
 
@@ -116,12 +116,12 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
       .locator('#ageVerificationModal')
       .waitFor({
         state: 'hidden',
-        timeout: timeoutMs,
+        timeout: clearTimeoutMs,
       })
       .catch(async () => {
         const stillVisible = await page
           .locator('#ageVerificationModal')
-          .isVisible({ timeout: 500 })
+          .isVisible({ timeout: 250 })
           .catch(() => false);
 
         if (stillVisible) {
@@ -131,7 +131,7 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
 
     const modalStillVisible = await page
       .locator('#ageVerificationModal')
-      .isVisible({ timeout: 500 })
+      .isVisible({ timeout: 250 })
       .catch(() => false);
 
     if (modalStillVisible) {
@@ -141,7 +141,7 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
     console.log(`[${name}] #ageVerificationModal cleared`);
 
     await page.waitForLoadState('domcontentloaded').catch(() => {});
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(250);
 
     return true;
   } catch (err) {
@@ -150,12 +150,12 @@ async function clickAgeVerificationModal(page, name, timeoutMs) {
   }
 }
 
-async function clickExactEnterButton(page, name, timeoutMs) {
+async function clickExactEnterButton(page, name, clickTimeoutMs) {
   try {
     const enterButton = page.locator('button#enterButton, #enterButton').first();
 
     if (await enterButton.count()) {
-      const visible = await enterButton.isVisible({ timeout: 1500 }).catch(() => false);
+      const visible = await enterButton.isVisible({ timeout: 300 }).catch(() => false);
       const label = await enterButton.textContent().catch(() => '');
 
       console.log(
@@ -166,13 +166,13 @@ async function clickExactEnterButton(page, name, timeoutMs) {
 
       if (visible) {
         await enterButton.click({
-          timeout: timeoutMs,
+          timeout: clickTimeoutMs,
           force: true,
         });
 
         console.log(`[${name}] clicked #enterButton`);
 
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(250);
 
         return true;
       }
@@ -184,7 +184,7 @@ async function clickExactEnterButton(page, name, timeoutMs) {
   return false;
 }
 
-async function clickModalContentEnter(page, name, timeoutMs) {
+async function clickModalContentEnter(page, name, clickTimeoutMs) {
   try {
     const modalContentEnter = page
       .locator(
@@ -202,7 +202,7 @@ async function clickModalContentEnter(page, name, timeoutMs) {
       .first();
 
     if (await modalContentEnter.count()) {
-      const visible = await modalContentEnter.isVisible({ timeout: 1500 }).catch(() => false);
+      const visible = await modalContentEnter.isVisible({ timeout: 300 }).catch(() => false);
       const label = await modalContentEnter.textContent().catch(() => '');
 
       console.log(
@@ -213,13 +213,13 @@ async function clickModalContentEnter(page, name, timeoutMs) {
 
       if (visible) {
         await modalContentEnter.click({
-          timeout: timeoutMs,
+          timeout: clickTimeoutMs,
           force: true,
         });
 
         console.log(`[${name}] clicked #modalContent enter control`);
 
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(250);
 
         return true;
       }
@@ -231,7 +231,7 @@ async function clickModalContentEnter(page, name, timeoutMs) {
   return false;
 }
 
-async function clickEnterLikeButton(page, name, timeoutMs) {
+async function clickEnterLikeButton(page, name, clickTimeoutMs) {
   try {
     const enterLikeButton = page
       .locator(
@@ -250,7 +250,7 @@ async function clickEnterLikeButton(page, name, timeoutMs) {
       .first();
 
     if (await enterLikeButton.count()) {
-      const visible = await enterLikeButton.isVisible({ timeout: 1500 }).catch(() => false);
+      const visible = await enterLikeButton.isVisible({ timeout: 300 }).catch(() => false);
 
       const label =
         (await enterLikeButton.textContent().catch(() => '')) ||
@@ -264,13 +264,13 @@ async function clickEnterLikeButton(page, name, timeoutMs) {
 
       if (visible) {
         await enterLikeButton.click({
-          timeout: timeoutMs,
+          timeout: clickTimeoutMs,
           force: true,
         });
 
         console.log(`[${name}] clicked enter-like button`);
 
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(250);
 
         return true;
       }
@@ -282,7 +282,7 @@ async function clickEnterLikeButton(page, name, timeoutMs) {
   return false;
 }
 
-async function clickImageBasedEnter(page, name, timeoutMs) {
+async function clickImageBasedEnter(page, name, clickTimeoutMs) {
   try {
     const imageFallback = page
       .locator(
@@ -297,7 +297,7 @@ async function clickImageBasedEnter(page, name, timeoutMs) {
       )
       .first();
 
-    if (await imageFallback.isVisible({ timeout: 1000 })) {
+    if (await imageFallback.isVisible({ timeout: 300 })) {
       const aria = await imageFallback.getAttribute('aria-label').catch(() => null);
       const title = await imageFallback.getAttribute('title').catch(() => null);
       const text = (await imageFallback.textContent().catch(() => '') || '').trim();
@@ -308,11 +308,11 @@ async function clickImageBasedEnter(page, name, timeoutMs) {
         console.log(`[${name}] clicking image-based fallback probe=${JSON.stringify(probe)}`);
 
         await imageFallback.click({
-          timeout: timeoutMs,
+          timeout: clickTimeoutMs,
           force: true,
         });
 
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(250);
 
         return true;
       }
@@ -324,7 +324,7 @@ async function clickImageBasedEnter(page, name, timeoutMs) {
   return false;
 }
 
-async function clickGenericDialogControl(page, name, timeoutMs) {
+async function clickGenericDialogControl(page, name, clickTimeoutMs) {
   try {
     const fallback = page
       .locator(
@@ -341,7 +341,7 @@ async function clickGenericDialogControl(page, name, timeoutMs) {
       )
       .first();
 
-    if (await fallback.isVisible({ timeout: 1000 })) {
+    if (await fallback.isVisible({ timeout: 300 })) {
       const label = await fallback.textContent().catch(() => '');
 
       console.log(
@@ -351,11 +351,11 @@ async function clickGenericDialogControl(page, name, timeoutMs) {
       );
 
       await fallback.click({
-        timeout: timeoutMs,
+        timeout: clickTimeoutMs,
         force: true,
       });
 
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(250);
 
       return true;
     }
@@ -366,7 +366,7 @@ async function clickGenericDialogControl(page, name, timeoutMs) {
   return false;
 }
 
-async function clickFirstSafeDialogControl(page, name, timeoutMs) {
+async function clickFirstSafeDialogControl(page, name, clickTimeoutMs) {
   try {
     const fallback = page
       .locator('dialog button, [role="dialog"] button, dialog a, [role="dialog"] a')
@@ -376,7 +376,7 @@ async function clickFirstSafeDialogControl(page, name, timeoutMs) {
       })
       .first();
 
-    if (await fallback.isVisible({ timeout: 1000 })) {
+    if (await fallback.isVisible({ timeout: 300 })) {
       const label = await fallback.textContent().catch(() => '');
 
       console.log(
@@ -386,11 +386,11 @@ async function clickFirstSafeDialogControl(page, name, timeoutMs) {
       );
 
       await fallback.click({
-        timeout: timeoutMs,
+        timeout: clickTimeoutMs,
         force: true,
       });
 
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(250);
 
       return true;
     }
@@ -401,7 +401,7 @@ async function clickFirstSafeDialogControl(page, name, timeoutMs) {
   return false;
 }
 
-async function waitForModalToClear(page, name, timeoutMs) {
+async function waitForModalToClear(page, name, clearTimeoutMs) {
   const modalSelectors = [
     '#ageVerificationModal',
     '#modalContent',
@@ -417,12 +417,12 @@ async function waitForModalToClear(page, name, timeoutMs) {
 
   const start = Date.now();
 
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < clearTimeoutMs) {
     let anyVisible = false;
 
     for (const selector of modalSelectors) {
       try {
-        const visible = await page.locator(selector).first().isVisible({ timeout: 250 });
+        const visible = await page.locator(selector).first().isVisible({ timeout: 100 });
 
         if (visible) {
           anyVisible = true;
@@ -436,7 +436,7 @@ async function waitForModalToClear(page, name, timeoutMs) {
       return true;
     }
 
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(150);
   }
 
   console.log(`[${name}] modal did not fully clear before timeout`);
@@ -459,7 +459,11 @@ async function modalKey(page, opts = {}) {
   const hostOverride = HOST_OVERRIDES[host] || {};
   const enterPatterns = opts.enterPatterns || hostOverride.enterPatterns || DEFAULT_ENTER_PATTERNS;
   const modalPatterns = opts.modalPatterns || DEFAULT_MODAL_PATTERNS;
-  const timeoutMs = opts.timeoutMs || 7000;
+
+  const timeoutMs = opts.timeoutMs || 3500;
+  const detectTimeoutMs = opts.detectTimeoutMs || Math.min(timeoutMs, 1500);
+  const clickTimeoutMs = opts.clickTimeoutMs || Math.min(timeoutMs, 2500);
+  const clearTimeoutMs = opts.clearTimeoutMs || Math.min(timeoutMs, 2000);
 
   console.log(`[${name}] start url=${page.url()}`);
 
@@ -476,11 +480,11 @@ async function modalKey(page, opts = {}) {
 
   let modalVisible = false;
 
-  for (let attempt = 1; attempt <= 4 && !modalVisible; attempt += 1) {
-    console.log(`[${name}] detect attempt ${attempt}/4`);
+  for (let attempt = 1; attempt <= 2 && !modalVisible; attempt += 1) {
+    console.log(`[${name}] detect attempt ${attempt}/2`);
 
     try {
-      modalVisible = await modalLocator.isVisible({ timeout: 1200 });
+      modalVisible = await modalLocator.isVisible({ timeout: detectTimeoutMs });
 
       if (modalVisible) {
         console.log(`[${name}] modal role dialog found`);
@@ -494,7 +498,7 @@ async function modalKey(page, opts = {}) {
       const hit = page.getByText(re).first();
 
       try {
-        if (await hit.isVisible({ timeout: 700 })) {
+        if (await hit.isVisible({ timeout: 250 })) {
           modalVisible = true;
           console.log(`[${name}] modal matched text pattern=${re}`);
           break;
@@ -504,11 +508,6 @@ async function modalKey(page, opts = {}) {
   }
 
   if (!modalVisible) {
-    modalVisible = await inferModalFromSignals(page, name);
-  }
-
-  if (!modalVisible) {
-    await page.waitForTimeout(500);
     modalVisible = await inferModalFromSignals(page, name);
   }
 
@@ -526,7 +525,7 @@ async function modalKey(page, opts = {}) {
   let chosen = null;
   const beforeUrl = page.url();
 
-  clicked = await clickAgeVerificationModal(page, name, timeoutMs);
+  clicked = await clickAgeVerificationModal(page, name, clickTimeoutMs, clearTimeoutMs);
 
   if (clicked) {
     return {
@@ -547,14 +546,14 @@ async function modalKey(page, opts = {}) {
 
   for (const [idx, loc] of candidates.entries()) {
     try {
-      if (await loc.isVisible({ timeout: 1000 })) {
+      if (await loc.isVisible({ timeout: 300 })) {
         chosen = idx;
         const label = await loc.textContent().catch(() => '');
 
         console.log(`[${name}] clicking candidate#${idx} label=${JSON.stringify((label || '').trim())}`);
 
         await loc.click({
-          timeout: timeoutMs,
+          timeout: clickTimeoutMs,
           force: true,
         });
 
@@ -566,12 +565,12 @@ async function modalKey(page, opts = {}) {
     }
   }
 
-  if (!clicked) clicked = await clickExactEnterButton(page, name, timeoutMs);
-  if (!clicked) clicked = await clickModalContentEnter(page, name, timeoutMs);
-  if (!clicked) clicked = await clickEnterLikeButton(page, name, timeoutMs);
-  if (!clicked) clicked = await clickImageBasedEnter(page, name, timeoutMs);
-  if (!clicked) clicked = await clickGenericDialogControl(page, name, timeoutMs);
-  if (!clicked) clicked = await clickFirstSafeDialogControl(page, name, timeoutMs);
+  if (!clicked) clicked = await clickExactEnterButton(page, name, clickTimeoutMs);
+  if (!clicked) clicked = await clickModalContentEnter(page, name, clickTimeoutMs);
+  if (!clicked) clicked = await clickEnterLikeButton(page, name, clickTimeoutMs);
+  if (!clicked) clicked = await clickImageBasedEnter(page, name, clickTimeoutMs);
+  if (!clicked) clicked = await clickGenericDialogControl(page, name, clickTimeoutMs);
+  if (!clicked) clicked = await clickFirstSafeDialogControl(page, name, clickTimeoutMs);
 
   if (!clicked) {
     console.log(`[${name}] modal detected but no enter CTA found treating as non-gate`);
@@ -583,10 +582,10 @@ async function modalKey(page, opts = {}) {
     };
   }
 
-  const modalCleared = await waitForModalToClear(page, name, timeoutMs);
+  const modalCleared = await waitForModalToClear(page, name, clearTimeoutMs);
 
   await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(250);
 
   const afterUrl = page.url();
   const remainingDialogs = await page.getByRole('dialog').count().catch(() => 0);
@@ -594,7 +593,7 @@ async function modalKey(page, opts = {}) {
   const enterButtonStillVisible = await page
     .locator('#enterButton, button[id*="enter" i]')
     .first()
-    .isVisible({ timeout: 500 })
+    .isVisible({ timeout: 250 })
     .catch(() => false);
 
   const success =
@@ -655,9 +654,8 @@ async function run() {
         timeout: 30000,
       });
 
-      console.log(`[runner] Waiting for network to be idle before processing...`);
       await page.waitForLoadState('networkidle').catch(() => {});
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(750);
 
       const hostname = new URL(url).hostname;
       const hostCleaned = hostname.replace(/^www\./, '');
@@ -665,12 +663,12 @@ async function run() {
       const result = await modalKey(page, {
         name: hostname,
         host: hostCleaned,
+        timeoutMs: 3500,
       });
 
       console.log(`[runner] result ${url} => ${JSON.stringify(result)}`);
 
-      console.log(`[runner] Pausing for 2 seconds to let the page settle...`);
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(750);
     } catch (err) {
       console.error(`[runner] error processing ${url}: ${err.message}`);
     }
