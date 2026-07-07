@@ -1,14 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('@playwright/test');
-
 const { modalKey } = require('./components/modalKey');
 const { yoti } = require('./components/yoti');
 const { geoCheck } = require('./components/geoCheck');
 const { siteCrawler } = require('./components/siteCrawler');
 
 const config = {
-  headless: false,
+  headless: true,
   navigationTimeoutMs: 30000,
   waitAfterLoadMs: 1500,
 
@@ -47,6 +46,101 @@ function readUrls(filePath) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
+}
+
+function summarizeWholeTest(result) {
+  const geoCheck = result.geoCheck || null;
+  const yoti = result.yoti || null;
+  const siteCrawler = result.siteCrawler || null;
+
+  const testedScenes = siteCrawler?.scenes?.testedItems || [];
+  const testedModels = siteCrawler?.models?.testedItems || [];
+
+  const brokenScenes = siteCrawler?.scenes?.brokenItems || [];
+  const brokenModels = siteCrawler?.models?.brokenItems || [];
+
+  const scenePagesPassed = testedScenes.filter((item) => {
+    return item.ok === true && item.status === 200 && !item.error;
+  }).length;
+
+  const sceneVideoPassed = testedScenes.filter((item) => {
+    return item.videoPlayback?.passed === true;
+  }).length;
+
+  const sceneVideoFailed = testedScenes.filter((item) => {
+    return item.videoPlayback && item.videoPlayback.passed !== true;
+  }).length;
+
+  const modelPagesPassed = testedModels.filter((item) => {
+    return item.ok === true && item.status === 200 && !item.error;
+  }).length;
+
+  const yotiModalPassed = yoti?.modalPresence?.fullyPresent === true;
+  const yotiRandomPassed = yoti?.randomEmailTest?.passed === true;
+
+  const yotiValidPassed =
+    yoti?.validEmailTest?.passed === true ||
+    yoti?.validEmailTest?.analysis?.passed === true;
+
+  const siteCrawlerPassed =
+    brokenScenes.length === 0 &&
+    brokenModels.length === 0 &&
+    sceneVideoFailed === 0;
+
+  const passed =
+    siteCrawlerPassed &&
+    (!yoti || (yotiModalPassed && yotiRandomPassed && yotiValidPassed));
+
+  return {
+    url: result.url,
+    finalUrl: result.finalUrl,
+    passed,
+
+    geo: geoCheck
+      ? {
+          ipProvider: geoCheck.ipProvider || null,
+          ip: geoCheck.ip || null,
+          city: geoCheck.city || null,
+          region: geoCheck.detectedRegion || null,
+          expectedRegion: geoCheck.expectedRegion || null,
+          regionMatched: geoCheck.ipRegionMatched === true,
+        }
+      : null,
+
+    yoti: yoti
+      ? {
+          modalFound: yotiModalPassed,
+          randomEmailToSafepassage: yotiRandomPassed,
+          validEmailToTourContent: yotiValidPassed,
+          error: yoti.error || null,
+        }
+      : null,
+
+    siteCrawler: siteCrawler
+      ? {
+          passed: siteCrawlerPassed,
+
+          scenes: {
+            cardsFound: siteCrawler.scenes?.cardsFound || 0,
+            tested: testedScenes.length,
+            pagesPassed: scenePagesPassed,
+            videoPassed: sceneVideoPassed,
+            videoFailed: sceneVideoFailed,
+            broken: brokenScenes.length,
+          },
+
+          models: {
+            cardsFound: siteCrawler.models?.cardsFound || 0,
+            tested: testedModels.length,
+            pagesPassed: modelPagesPassed,
+            broken: brokenModels.length,
+          },
+
+          totalTested: testedScenes.length + testedModels.length,
+          totalBroken: brokenScenes.length + brokenModels.length,
+        }
+      : null,
+  };
 }
 
 async function runFlowForUrl(page, url) {
@@ -97,8 +191,6 @@ async function runFlowForUrl(page, url) {
   if (config.components.yoti?.enabled) {
     console.log('[main] about to run yoti');
 
-    // For debugging, run Yoti directly.
-    // Do NOT skip based on geoResult yet.
     yotiResult = await yoti(page, {
       name: 'yoti',
       timeoutMs: config.components.yoti.timeoutMs,
@@ -141,14 +233,36 @@ if (config.components.siteCrawler?.enabled) {
 
   await page.waitForTimeout(3000);
 
-  return {
-    url,
-    finalUrl: page.url(),
-    modalKey: modalResult,
-    geoCheck: geoResult,
-    yoti: yotiResult,
-    siteCrawler: siteCrawlerResult,
-  };
+  const fullResult = {
+  url,
+  finalUrl: page.url(),
+  geoCheck: geoResult,
+  siteCrawler: siteCrawlerResult,
+  yoti: yotiResult,
+};
+
+return summarizeWholeTest(fullResult);
+}
+
+function saveResultsJson(results) {
+  const outputDir = path.resolve(process.cwd(), 'results');
+
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, '-');
+
+  const outputPath = path.join(outputDir, `qa-summary-${timestamp}.json`);
+
+  fs.writeFileSync(outputPath, JSON.stringify(results, null, 2), 'utf8');
+
+  console.log('');
+  console.log(`[main] summary JSON saved to: ${outputPath}`);
+
+  return outputPath;
 }
 
 async function main() {
@@ -175,11 +289,12 @@ async function main() {
   try {
     for (const url of urls) {
       const result = await runFlowForUrl(page, url);
-      results.push(result);
-    }
-
-    console.log('\n========== RESULTS ==========');
-    console.log(JSON.stringify(results, null, 2));
+        results.push(result);
+      }
+        console.log('\n========== SUMMARY RESULTS ==========');
+        console.log(JSON.stringify(results, null, 2));
+      const outputPath = saveResultsJson(results);
+        console.log(`[main] result file: ${outputPath}`);
   } finally {
     await browser.close();
   }

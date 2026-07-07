@@ -1,0 +1,40 @@
+[
+  {
+    "url": "https://nympho.com",
+    "finalUrl": "https://nympho.com/",
+    "passed": true,
+    "geo": {
+      "ipProvider": "https://ipwho.is/",
+      "ip": "195.210.124.156",
+      "city": "Des Moines",
+      "region": "Iowa",
+      "expectedRegion": "Iowa",
+      "regionMatched": true
+    },
+    "yoti": {
+      "modalFound": true,
+      "randomEmailToSafepassage": true,
+      "validEmailToTourContent": true,
+      "error": null
+    },
+    "siteCrawler": {
+      "passed": true,
+      "scenes": {
+        "cardsFound": 10,
+        "tested": 5,
+        "pagesPassed": 5,
+        "videoPassed": 5,
+        "videoFailed": 0,
+        "broken": 0
+      },
+      "models": {
+        "cardsFound": 42,
+        "tested": 5,
+        "pagesPassed": 5,
+        "broken": 0
+      },
+      "totalTested": 10,
+      "totalBroken": 0
+    }
+  }
+]
