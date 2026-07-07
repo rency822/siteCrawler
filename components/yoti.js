@@ -146,17 +146,46 @@ async function fillYotiEmail(page, email, opts = {}) {
     timeout: timeoutMs,
   });
 
+  await emailInput.click({
+    timeout: timeoutMs,
+  });
+
   await emailInput.fill('', {
     timeout: timeoutMs,
   });
+
+  await emailInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await emailInput.press('Backspace').catch(() => {});
+
+  await emailInput.evaluate((input) => {
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  await page.waitForTimeout(300);
 
   await emailInput.fill(email, {
     timeout: timeoutMs,
   });
 
+  await emailInput.evaluate((input, value) => {
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+  }, email);
+
+  await page.waitForTimeout(300);
+
   const actualValue = await emailInput.inputValue().catch(() => '');
 
-  console.log(`[${name}] email input value=${actualValue}`);
+  console.log(`[${name}] expected email=${email}`);
+  console.log(`[${name}] actual email value=${actualValue}`);
+
+  if (actualValue !== email) {
+    throw new Error(`[${name}] email input value mismatch. Expected ${email}, got ${actualValue}`);
+  }
 
   return actualValue;
 }
@@ -235,13 +264,13 @@ async function analyzeAfterValidEmail(page, opts = {}) {
 
   console.log(`[${name}] analyzing page after valid email`);
 
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(2000);
-
   const result = {
     label: 'valid-email-tour-content',
     currentUrl: page.url(),
+
+    redirectedToSafepassage: false,
+    skipCurrentUrl: false,
+    skipReason: null,
 
     yotiModalExists: false,
     yotiModalVisible: false,
@@ -260,6 +289,27 @@ async function analyzeAfterValidEmail(page, opts = {}) {
 
     passed: false,
   };
+
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(2000);
+
+  const currentUrlAfterWait = page.url();
+
+  result.currentUrl = currentUrlAfterWait;
+  result.redirectedToSafepassage = /safepassageapp\.com/i.test(currentUrlAfterWait);
+
+  if (result.redirectedToSafepassage) {
+    result.skipCurrentUrl = true;
+    result.skipReason = 'Correct email redirected to SafePassage instead of tour content';
+    result.passed = false;
+
+    console.log(`[${name}] valid email redirected to SafePassage`);
+    console.log(`[${name}] currentUrl=${currentUrlAfterWait}`);
+    console.log(`[${name}] marking current URL to skip`);
+
+    return result;
+  }
 
   result.yotiModalExists = await page
     .locator('#YppAgeTourModal')
@@ -383,8 +433,10 @@ async function runValidEmailContentTest(page, testCase, opts = {}) {
   const beforeUrl = page.url();
 
   console.log('');
+  console.log(`[${name}] VALID EMAIL TEST IS RUNNING`);
   console.log(`[${name}] starting ${testCase.label}`);
   console.log(`[${name}] beforeUrl=${beforeUrl}`);
+  console.log(`[${name}] valid email being used=${testCase.email}`);
 
   await fillYotiEmail(page, testCase.email, {
     name,
@@ -406,6 +458,11 @@ async function runValidEmailContentTest(page, testCase, opts = {}) {
     email: testCase.email,
     beforeUrl,
     afterUrl: analysis.currentUrl,
+
+    redirectedToSafepassage: analysis.redirectedToSafepassage === true,
+    skipCurrentUrl: analysis.skipCurrentUrl === true,
+    skipReason: analysis.skipReason || null,
+
     analysis,
     passed: analysis.passed,
   };
@@ -424,7 +481,9 @@ async function returnToStartUrl(page, startUrl, opts = {}) {
   });
 
   await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(3000);
+
+  console.log(`[${name}] after return currentUrl=${page.url()}`);
 }
 
 async function yoti(page, opts = {}) {
@@ -445,10 +504,20 @@ async function yoti(page, opts = {}) {
   const result = {
     component: 'yoti',
     startUrl,
+
+    present: null,
+    skipped: false,
+    required: null,
+    reason: null,
+
+    skipCurrentUrl: false,
+    skipReason: null,
+
     modalPresence: null,
     randomEmailTest: null,
     secondModalPresence: null,
     validEmailTest: null,
+
     error: null,
   };
 
@@ -459,9 +528,20 @@ async function yoti(page, opts = {}) {
     });
 
     if (!result.modalPresence.fullyPresent) {
-      result.error = 'Yoti modal was not fully present before random email test';
+      result.present = false;
+      result.skipped = true;
+      result.required = false;
+      result.error = null;
+      result.reason = 'Yoti modal was not present on this URL';
+
+      console.log(`[${name}] Yoti modal not present. Skipping Yoti tests and continuing.`);
+
       return result;
     }
+
+    result.present = true;
+    result.skipped = false;
+    result.required = true;
 
     result.randomEmailTest = await runRandomEmailRedirectTest(
       page,
@@ -481,13 +561,30 @@ async function yoti(page, opts = {}) {
       timeoutMs,
     });
 
+    console.log(`[${name}] preparing valid email test`);
+    console.log(`[${name}] validEmail=${validEmail}`);
+
     result.secondModalPresence = await waitForYotiModal(page, {
       name,
       timeoutMs,
     });
 
+    console.log(
+      `[${name}] secondModalPresence.fullyPresent=${result.secondModalPresence.fullyPresent}`
+    );
+
     if (!result.secondModalPresence.fullyPresent) {
-      result.error = 'Yoti modal was not fully present before valid email test';
+      result.error = 'Yoti modal was not present before valid email test';
+      result.validEmailTest = {
+        label: 'valid-email-tour-content',
+        email: validEmail,
+        skipped: true,
+        passed: false,
+        reason: 'Yoti modal was not present before valid email test',
+      };
+
+      console.log(`[${name}] valid email test skipped because modal is not present`);
+
       return result;
     }
 
@@ -502,6 +599,17 @@ async function yoti(page, opts = {}) {
         timeoutMs,
       }
     );
+
+    if (result.validEmailTest?.skipCurrentUrl) {
+      result.skipCurrentUrl = true;
+      result.skipReason = result.validEmailTest.skipReason;
+      result.error = null;
+
+      console.log(`[${name}] skipCurrentUrl=true`);
+      console.log(`[${name}] skipReason=${result.skipReason}`);
+
+      return result;
+    }
 
     return result;
   } catch (error) {
