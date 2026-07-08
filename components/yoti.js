@@ -261,6 +261,7 @@ async function runRandomEmailRedirectTest(page, testCase, opts = {}) {
 
 async function analyzeAfterValidEmail(page, opts = {}) {
   const name = opts.name || 'yoti';
+  const safePassageUrlPattern = opts.safePassageUrlPattern || /safepassageapp\.com/i;
 
   console.log(`[${name}] analyzing page after valid email`);
 
@@ -297,11 +298,11 @@ async function analyzeAfterValidEmail(page, opts = {}) {
   const currentUrlAfterWait = page.url();
 
   result.currentUrl = currentUrlAfterWait;
-  result.redirectedToSafepassage = /safepassageapp\.com/i.test(currentUrlAfterWait);
+  result.redirectedToSafepassage = safePassageUrlPattern.test(currentUrlAfterWait);
 
   if (result.redirectedToSafepassage) {
     result.skipCurrentUrl = true;
-    result.skipReason = 'Correct email redirected to SafePassage instead of tour content';
+    result.skipReason = 'Correct email redirected to SafePassage instead of start URL/tour content';
     result.passed = false;
 
     console.log(`[${name}] valid email redirected to SafePassage`);
@@ -409,6 +410,7 @@ async function analyzeAfterValidEmail(page, opts = {}) {
     );
 
   console.log(`[${name}] after valid email currentUrl=${result.currentUrl}`);
+  console.log(`[${name}] redirectedToSafepassage=${result.redirectedToSafepassage}`);
   console.log(`[${name}] yotiModalExists=${result.yotiModalExists}`);
   console.log(`[${name}] yotiModalVisible=${result.yotiModalVisible}`);
   console.log(`[${name}] emailInputVisible=${result.emailInputVisible}`);
@@ -429,6 +431,7 @@ async function analyzeAfterValidEmail(page, opts = {}) {
 async function runValidEmailContentTest(page, testCase, opts = {}) {
   const name = opts.name || 'yoti';
   const timeoutMs = opts.timeoutMs || 25000;
+  const safePassageUrlPattern = opts.safePassageUrlPattern || /safepassageapp\.com/i;
 
   const beforeUrl = page.url();
 
@@ -451,6 +454,7 @@ async function runValidEmailContentTest(page, testCase, opts = {}) {
   const analysis = await analyzeAfterValidEmail(page, {
     name,
     timeoutMs,
+    safePassageUrlPattern,
   });
 
   return {
@@ -460,8 +464,11 @@ async function runValidEmailContentTest(page, testCase, opts = {}) {
     afterUrl: analysis.currentUrl,
 
     redirectedToSafepassage: analysis.redirectedToSafepassage === true,
-    skipCurrentUrl: analysis.skipCurrentUrl === true,
-    skipReason: analysis.skipReason || null,
+    skipCurrentUrl: analysis.redirectedToSafepassage === true,
+    skipReason:
+      analysis.redirectedToSafepassage === true
+        ? analysis.skipReason || 'Correct email redirected to SafePassage instead of start URL/tour content'
+        : null,
 
     analysis,
     passed: analysis.passed,
@@ -473,7 +480,7 @@ async function returnToStartUrl(page, startUrl, opts = {}) {
   const timeoutMs = opts.timeoutMs || 25000;
 
   console.log('');
-  console.log(`[${name}] returning to startUrl=${startUrl}`);
+  console.log(`[${name}] returning to original startUrl=${startUrl}`);
 
   await page.goto(startUrl, {
     waitUntil: 'domcontentloaded',
@@ -484,6 +491,8 @@ async function returnToStartUrl(page, startUrl, opts = {}) {
   await page.waitForTimeout(3000);
 
   console.log(`[${name}] after return currentUrl=${page.url()}`);
+
+  return page.url();
 }
 
 async function yoti(page, opts = {}) {
@@ -494,6 +503,7 @@ async function yoti(page, opts = {}) {
 
   const randomEmail = opts.randomEmail || `qa-random-${Date.now()}@gmail.com`;
   const validEmail = opts.validEmail;
+  const safePassageUrlPattern = opts.safePassageUrlPattern || /safepassageapp\.com/i;
 
   if (!validEmail) {
     throw new Error('[yoti] validEmail is required');
@@ -548,7 +558,7 @@ async function yoti(page, opts = {}) {
       {
         label: 'random-email-safepassage',
         email: randomEmail,
-        expectedUrlPattern: opts.safePassageUrlPattern || /safepassageapp\.com/i,
+        expectedUrlPattern: safePassageUrlPattern,
       },
       {
         name,
@@ -563,6 +573,7 @@ async function yoti(page, opts = {}) {
 
     console.log(`[${name}] preparing valid email test`);
     console.log(`[${name}] validEmail=${validEmail}`);
+    console.log(`[${name}] original startUrl=${startUrl}`);
 
     result.secondModalPresence = await waitForYotiModal(page, {
       name,
@@ -597,19 +608,32 @@ async function yoti(page, opts = {}) {
       {
         name,
         timeoutMs,
+        safePassageUrlPattern,
       }
     );
 
-    if (result.validEmailTest?.skipCurrentUrl) {
+    const validEmailRedirectedToSafepassage =
+      result.validEmailTest?.redirectedToSafepassage === true ||
+      result.validEmailTest?.analysis?.redirectedToSafepassage === true;
+
+    if (validEmailRedirectedToSafepassage) {
       result.skipCurrentUrl = true;
-      result.skipReason = result.validEmailTest.skipReason;
+      result.skipReason =
+        result.validEmailTest?.skipReason ||
+        result.validEmailTest?.analysis?.skipReason ||
+        'Correct email redirected to SafePassage instead of start URL/tour content';
+
       result.error = null;
 
       console.log(`[${name}] skipCurrentUrl=true`);
+      console.log(`[${name}] valid email actually redirected to SafePassage`);
       console.log(`[${name}] skipReason=${result.skipReason}`);
 
       return result;
     }
+
+    result.skipCurrentUrl = false;
+    result.skipReason = null;
 
     return result;
   } catch (error) {

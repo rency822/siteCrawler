@@ -52,6 +52,34 @@ function readUrls(filePath) {
     .filter((line) => line && !line.startsWith('#'));
 }
 
+function isSfwUrl(url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    return hostname === 'sfw' || hostname.startsWith('sfw.');
+  } catch {
+    return /(^|\/\/)sfw\./i.test(url);
+  }
+}
+
+function isBlockedPagesUrl(url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    return hostname === 'blockedpages.com' || hostname.endsWith('.blockedpages.com');
+  } catch {
+    return /(^|\/\/)([^/]+\.)?blockedpages\.com/i.test(url);
+  }
+}
+
 function summarizeWholeTest(result) {
   const geoCheck = result.geoCheck || null;
   const yoti = result.yoti || null;
@@ -132,6 +160,9 @@ const sceneVideoOpenedJoinForm = testedScenes.filter((item) => {
     finalUrl: result.finalUrl,
     passed,
 
+    skipped: result.skipped === true,
+    skipReason: result.skipReason || null,
+    
     ...(result.skipped === true ? { skipped: true } : {}),
     ...(result.skipReason ? { skipReason: result.skipReason } : {}),
 
@@ -338,6 +369,41 @@ function saveResultsJson(results) {
   return outputPath;
 }
 
+function shouldSkipCurrentUrlForYoti(yotiResult) {
+  if (!yotiResult) {
+    return {
+      skip: false,
+      reason: null,
+    };
+  }
+
+  const validEmailAfterUrl =
+    yotiResult.validEmailTest?.afterUrl ||
+    yotiResult.validEmailTest?.analysis?.currentUrl ||
+    '';
+
+  const validEmailRedirectedToSafepassage =
+    yotiResult.validEmailTest?.redirectedToSafepassage === true ||
+    yotiResult.validEmailTest?.analysis?.redirectedToSafepassage === true ||
+    /safepassageapp\.com/i.test(validEmailAfterUrl);
+
+  if (validEmailRedirectedToSafepassage) {
+    return {
+      skip: true,
+      reason:
+        yotiResult.skipReason ||
+        yotiResult.validEmailTest?.skipReason ||
+        yotiResult.validEmailTest?.analysis?.skipReason ||
+        'Correct email redirected to SafePassage instead of start URL/tour content',
+    };
+  }
+
+  return {
+    skip: false,
+    reason: null,
+  };
+}
+
 async function runFlowForUrl(page, url) {
   console.log(`\n[main] opening ${url}`);
 
@@ -349,6 +415,30 @@ async function runFlowForUrl(page, url) {
   console.log('[main] waiting for page to settle');
   await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForTimeout(config.waitAfterLoadMs);
+
+    const finalUrlAfterInitialLoad = page.url();
+
+        if (isSfwUrl(finalUrlAfterInitialLoad) || isBlockedPagesUrl(finalUrlAfterInitialLoad)) {
+          const skipReason = isBlockedPagesUrl(finalUrlAfterInitialLoad)
+            ? 'Start URL redirected to blockedpages.com'
+            : 'Start URL redirected to SFW';
+
+          console.log(`[main] ${skipReason}`);
+          console.log(`[main] startUrl=${url}`);
+          console.log(`[main] finalUrl=${finalUrlAfterInitialLoad}`);
+
+          const fullResult = {
+            url,
+            finalUrl: finalUrlAfterInitialLoad,
+            geoCheck: null,
+            siteCrawler: null,
+            yoti: null,
+            skipped: true,
+            skipReason,
+          };
+
+      return summarizeWholeTest(fullResult);
+    }
 
   let modalResult = null;
 
@@ -396,18 +486,24 @@ async function runFlowForUrl(page, url) {
 
     console.log('[main] yoti completed');
 
-    if (yotiResult?.skipCurrentUrl) {
+    const yotiSkipDecision = shouldSkipCurrentUrlForYoti(yotiResult);
+
+    if (yotiSkipDecision.skip) {
       console.log('[main] Yoti requested skipping this URL');
-      console.log(`[main] reason=${yotiResult.skipReason}`);
+      console.log(`[main] reason=${yotiSkipDecision.reason}`);
 
       const fullResult = {
         url,
         finalUrl: page.url(),
         geoCheck: geoResult,
         siteCrawler: null,
-        yoti: yotiResult,
+        yoti: {
+          ...yotiResult,
+          skipCurrentUrl: true,
+          skipReason: yotiSkipDecision.reason,
+        },
         skipped: true,
-        skipReason: yotiResult.skipReason,
+        skipReason: yotiSkipDecision.reason,
       };
 
       return summarizeWholeTest(fullResult);

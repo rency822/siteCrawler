@@ -583,21 +583,44 @@ async function gotoAndSettle(page, url, opts = {}) {
 }
 
 async function extractCards(page, type, baseUrl) {
+  const sceneHrefPatterns = [
+    '/scenes/',
+    '/scene/',
+    '/videos/',
+    '/video/',
+  ];
+
+  const modelHrefPatterns = [
+    '/models/',
+    '/model/',
+  ];
+
   const selectors =
     type === 'scene'
       ? [
-          'a.content-title[href*="/scenes/"]',
-          '.content-item-small a[href*="/scenes/"]',
-          '.content-border a[href*="/scenes/"]',
-          '#latest-videos-wrap a[href*="/scenes/"]',
+          'a.content-title[href]',
+          '.content-item-small a[href]',
+          '.content-border a[href]',
+          '#latest-videos-wrap a[href]',
+          '.video-item a[href]',
+          '.video-card a[href]',
+          '.scene-item a[href]',
+          '.scene-card a[href]',
           'a[href*="/scenes/"]',
+          'a[href*="/scene/"]',
+          'a[href*="/videos/"]',
+          'a[href*="/video/"]',
         ]
       : [
-          'a.model-name[href*="/models/"]',
-          '.model-card a[href*="/models/"]',
-          '.model-loop a[href*="/models/"]',
+          'a.model-name[href]',
+          '.model-card a[href]',
+          '.model-loop a[href]',
+          '.model-item a[href]',
           'a[href*="/models/"]',
+          'a[href*="/model/"]',
         ];
+
+  const allowedPatterns = type === 'scene' ? sceneHrefPatterns : modelHrefPatterns;
 
   const cards = [];
 
@@ -626,9 +649,24 @@ async function extractCards(page, type, baseUrl) {
         continue;
       }
 
+      if (isLikelyAssetUrl(url)) {
+        continue;
+      }
+
+      const urlPath = new URL(url).pathname.toLowerCase();
+
+      const isAllowedCardUrl = allowedPatterns.some((pattern) => {
+        return urlPath.includes(pattern);
+      });
+
+      if (!isAllowedCardUrl) {
+        continue;
+      }
+
       const text = await item
         .innerText({ timeout: 500 })
         .catch(async () => item.getAttribute('title').catch(() => ''))
+        .catch(async () => item.locator('img').first().getAttribute('alt').catch(() => ''))
         .catch(() => '');
 
       cards.push({
@@ -1031,6 +1069,99 @@ async function testModelPage(page, model, opts = {}) {
   }
 }
 
+async function resolveSectionUrl(page, origin, type, opts = {}) {
+  const name = opts.name || 'siteCrawler';
+  const timeoutMs = opts.timeoutMs || 15000;
+
+  const candidates =
+    type === 'scene'
+      ? [
+          `${origin}/scenes`,
+          `${origin}/scene`,
+          `${origin}/videos`,
+          `${origin}/video`,
+        ]
+      : [
+          `${origin}/models`,
+          `${origin}/model`,
+        ];
+
+  const result = {
+    type,
+    found: false,
+    skipped: false,
+    sectionUrl: null,
+    triedUrls: [],
+    reason: null,
+    error: null,
+  };
+
+  for (const candidateUrl of candidates) {
+    const check = {
+      url: candidateUrl,
+      status: null,
+      ok: false,
+      cardsFound: 0,
+      error: null,
+    };
+
+    try {
+      console.log(`[${name}] checking ${type} section candidate=${candidateUrl}`);
+
+      const response = await gotoAndSettle(page, candidateUrl, {
+        timeoutMs,
+        waitAfterLoadMs: 1000,
+      });
+
+      check.status = response ? response.status() : null;
+      check.ok = response ? response.ok() : false;
+
+      if (!check.ok) {
+        result.triedUrls.push(check);
+        continue;
+      }
+
+      const cards = await extractCards(page, type, origin);
+      check.cardsFound = cards.length;
+
+      result.triedUrls.push(check);
+
+      if (cards.length > 0) {
+        result.found = true;
+        result.sectionUrl = candidateUrl;
+
+        console.log(
+          `[${name}] ${type} section found url=${candidateUrl} cardsFound=${cards.length}`
+        );
+
+        return result;
+      }
+
+      console.log(
+        `[${name}] ${type} section candidate had no cards url=${candidateUrl}`
+      );
+    } catch (error) {
+      check.error = error.message;
+      result.triedUrls.push(check);
+
+      console.log(
+        `[${name}] ${type} section candidate failed url=${candidateUrl} error=${error.message}`
+      );
+    }
+  }
+
+  result.found = false;
+  result.skipped = true;
+  result.reason =
+    type === 'model'
+      ? 'No model/models page found. Skipping model checks.'
+      : 'No scene/scenes/video/videos page found. Skipping scene checks.';
+
+  console.log(`[${name}] ${result.reason}`);
+
+  return result;
+}
+
 async function testRandomSectionItems(page, sectionUrl, type, count, opts = {}) {
   const name = opts.name || 'siteCrawler';
   const timeoutMs = opts.timeoutMs || 30000;
@@ -1041,6 +1172,8 @@ async function testRandomSectionItems(page, sectionUrl, type, count, opts = {}) 
     type,
     sectionUrl,
     fullSectionUrl: sectionUrl,
+    skipped: false,
+    skipReason: null,
     cardsFound: 0,
     selectedItems: [],
     testedItems: [],
@@ -1048,17 +1181,54 @@ async function testRandomSectionItems(page, sectionUrl, type, count, opts = {}) 
     error: null,
   };
 
+  if (!sectionUrl) {
+    result.skipped = true;
+    result.skipReason =
+      type === 'model'
+        ? 'No model/models page found. Skipping model checks.'
+        : 'No scene/scenes/video/videos page found. Skipping scene checks.';
+
+    console.log(`[${name}] ${result.skipReason}`);
+
+    return result;
+  }
+
   try {
     console.log(`[${name}] opening ${type} section ${sectionUrl}`);
 
-    await gotoAndSettle(page, sectionUrl, {
+    const response = await gotoAndSettle(page, sectionUrl, {
       timeoutMs,
       waitAfterLoadMs,
     });
 
+    const status = response ? response.status() : null;
+    const ok = response ? response.ok() : false;
+
+    if (!ok) {
+      result.skipped = true;
+      result.skipReason = `${type} section returned status ${status}. Skipping ${type} checks.`;
+
+      console.log(`[${name}] ${result.skipReason}`);
+
+      return result;
+    }
+
     const cards = await extractCards(page, type, baseUrl);
 
     result.cardsFound = cards.length;
+
+    if (cards.length === 0) {
+      result.skipped = true;
+      result.skipReason =
+        type === 'model'
+          ? 'Model page found but no model cards found. Skipping model checks.'
+          : 'Scene/video page found but no scene cards found. Skipping scene checks.';
+
+      console.log(`[${name}] ${result.skipReason}`);
+
+      return result;
+    }
+
     result.selectedItems = shuffle(cards).slice(0, count);
 
     console.log(`[${name}] ${type} cardsFound=${result.cardsFound}`);
@@ -1086,8 +1256,12 @@ async function testRandomSectionItems(page, sectionUrl, type, count, opts = {}) 
 
     return result;
   } catch (error) {
+    result.skipped = true;
+    result.skipReason = `${type} section failed. Skipping ${type} checks.`;
     result.error = error.message;
-    console.log(`[${name}] ${type} section error=${error.message}`);
+
+    console.log(`[${name}] ${result.skipReason} error=${error.message}`);
+
     return result;
   }
 }
@@ -1107,10 +1281,15 @@ async function siteCrawler(page, opts = {}) {
     component: 'siteCrawler',
     startUrl,
     fullStartUrl: startUrl,
-    scenesUrl: `${origin}/scenes`,
-    fullScenesUrl: `${origin}/scenes`,
-    modelsUrl: `${origin}/models`,
-    fullModelsUrl: `${origin}/models`,
+
+    scenesUrl: null,
+    fullScenesUrl: null,
+    scenesSectionResolution: null,
+
+    modelsUrl: null,
+    fullModelsUrl: null,
+    modelsSectionResolution: null,
+
     navigationCheck: null,
     sitemapCheck: null,
     scenes: null,
@@ -1135,6 +1314,14 @@ async function siteCrawler(page, opts = {}) {
       randomSitemapLinkCount,
     });
 
+    result.scenesSectionResolution = await resolveSectionUrl(page, origin, 'scene', {
+      name,
+      timeoutMs,
+    });
+
+    result.scenesUrl = result.scenesSectionResolution.sectionUrl;
+    result.fullScenesUrl = result.scenesSectionResolution.sectionUrl;
+
     result.scenes = await testRandomSectionItems(
       page,
       result.scenesUrl,
@@ -1147,6 +1334,14 @@ async function siteCrawler(page, opts = {}) {
         baseUrl: origin,
       }
     );
+
+    result.modelsSectionResolution = await resolveSectionUrl(page, origin, 'model', {
+      name,
+      timeoutMs,
+    });
+
+    result.modelsUrl = result.modelsSectionResolution.sectionUrl;
+    result.fullModelsUrl = result.modelsSectionResolution.sectionUrl;
 
     result.models = await testRandomSectionItems(
       page,
@@ -1195,13 +1390,17 @@ function summarizeSiteCrawlerResult(result) {
   const brokenModels = result.models?.brokenItems || [];
 
   return {
-    component: 'siteCrawler',
-    startUrl: result.startUrl,
-    fullStartUrl: result.fullStartUrl || result.startUrl,
-    scenesUrl: result.scenesUrl,
-    fullScenesUrl: result.fullScenesUrl || result.scenesUrl,
-    modelsUrl: result.modelsUrl,
-    fullModelsUrl: result.fullModelsUrl || result.modelsUrl,
+  component: 'siteCrawler',
+  startUrl: result.startUrl,
+  fullStartUrl: result.fullStartUrl || result.startUrl,
+
+  scenesUrl: result.scenesUrl,
+  fullScenesUrl: result.fullScenesUrl || result.scenesUrl,
+  scenesSectionResolution: result.scenesSectionResolution || null,
+
+  modelsUrl: result.modelsUrl,
+  fullModelsUrl: result.fullModelsUrl || result.modelsUrl,
+  modelsSectionResolution: result.modelsSectionResolution || null,
 
     summary: {
       sitemapPriorityReport:
@@ -1223,11 +1422,15 @@ function summarizeSiteCrawlerResult(result) {
       sceneVideoPassed,
       sceneVideoFailed,
       brokenScenes: brokenScenes.length,
+      sceneSectionSkipped: result.scenes?.skipped === true,
+      sceneSectionSkipReason: result.scenes?.skipReason || null,
 
       modelCardsFound: result.models?.cardsFound || 0,
       randomModelsTested: testedModels.length,
       modelPagesPassed,
       brokenModels: brokenModels.length,
+      modelSectionSkipped: result.models?.skipped === true,
+      modelSectionSkipReason: result.models?.skipReason || null,
 
       totalTested:
         (result.navigationCheck?.linksChecked || 0) +
