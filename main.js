@@ -159,12 +159,11 @@ const sceneVideoOpenedJoinForm = testedScenes.filter((item) => {
     url: result.url,
     finalUrl: result.finalUrl,
     passed,
-
-    skipped: result.skipped === true,
-    skipReason: result.skipReason || null,
     
     ...(result.skipped === true ? { skipped: true } : {}),
     ...(result.skipReason ? { skipReason: result.skipReason } : {}),
+
+    sslCertificateIssue: result.sslCertificateIssue || null,
 
     geo: geoCheck
       ? {
@@ -404,17 +403,152 @@ function shouldSkipCurrentUrlForYoti(yotiResult) {
   };
 }
 
-async function runFlowForUrl(page, url) {
-  console.log(`\n[main] opening ${url}`);
+function isSslCertificateError(error) {
+  const message = String(error?.message || error || '');
 
-  await page.goto(url, {
+  return (
+    /net::ERR_CERT_/i.test(message) ||
+    /ERR_SSL_/i.test(message) ||
+    /SSL/i.test(message) ||
+    /certificate/i.test(message) ||
+    /COMMON_NAME_INVALID/i.test(message)
+  );
+}
+
+async function readSslDetails(page) {
+  const details = {
+    detailsText: null,
+    bodyText: null,
+    currentUrl: null,
+  };
+
+  try {
+    details.currentUrl = page.url();
+  } catch {}
+
+  try {
+    details.detailsText = await page
+      .locator('#details')
+      .innerText({ timeout: 3000 })
+      .catch(() => null);
+  } catch {}
+
+  try {
+    details.bodyText = await page
+      .locator('body')
+      .innerText({ timeout: 3000 })
+      .catch(() => null);
+  } catch {}
+
+  return details;
+}
+
+async function buildSslSkipResult(page, url, error) {
+  const sslDetails = await readSslDetails(page);
+
+  const skipReason = `SSL certificate issue: ${String(error?.message || error || 'Unknown SSL certificate error')}`;
+
+  console.log('[main] SSL certificate issue detected');
+  console.log(`[main] startUrl=${url}`);
+  console.log(`[main] finalUrl=${sslDetails.currentUrl || page.url()}`);
+  console.log(`[main] reason=${skipReason}`);
+
+  if (sslDetails.detailsText) {
+    console.log(`[main] sslDetails=#details ${sslDetails.detailsText}`);
+  }
+
+  return {
+    url,
+    finalUrl: sslDetails.currentUrl || page.url(),
+    geoCheck: null,
+    siteCrawler: null,
+    yoti: null,
+    skipped: true,
+    skipReason,
+    sslCertificateIssue: {
+      detected: true,
+      reason: skipReason,
+      detailsText: sslDetails.detailsText,
+      bodyText: sslDetails.bodyText,
+    },
+  };
+}
+
+async function gotoWithRetry(page, url, opts = {}) {
+  const name = opts.name || 'main';
+  const retries = opts.retries || 3;
+  const timeoutMs = opts.timeoutMs || 30000;
+  const waitUntil = opts.waitUntil || 'domcontentloaded';
+  const retryDelayMs = opts.retryDelayMs || 2000;
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      console.log(`[${name}] opening ${url}`);
+      console.log(`[${name}] goto attempt ${attempt}/${retries}`);
+
+      const response = await page.goto(url, {
+        waitUntil,
+        timeout: timeoutMs,
+      });
+
+      console.log(`[${name}] goto success attempt ${attempt}/${retries}`);
+
+      return response;
+    } catch (error) {
+      lastError = error;
+
+      if (isSslCertificateError(error)) {
+        throw error;
+      }
+
+      console.log(`[${name}] goto failed attempt ${attempt}/${retries}`);
+      console.log(`[${name}] goto error=${error.message}`);
+
+      if (attempt < retries) {
+        await page.waitForTimeout(retryDelayMs).catch(() => {});
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function runFlowForUrl(page, url) {
+  console.log(`[main] opening ${url}`);
+
+try {
+  await gotoWithRetry(page, url, {
+    name: 'main',
+    retries: 3,
+    timeoutMs: config.navigationTimeoutMs,
     waitUntil: 'domcontentloaded',
+    retryDelayMs: 2000,
+  });
+} catch (error) {
+  if (isSslCertificateError(error)) {
+    const fullResult = await buildSslSkipResult(page, url, error);
+    return summarizeWholeTest(fullResult);
+  }
+
+  throw error;
+}
+
+console.log('[main] waiting for page to settle');
+
+try {
+  await page.waitForLoadState('networkidle', {
     timeout: config.navigationTimeoutMs,
   });
+} catch (error) {
+  if (isSslCertificateError(error)) {
+    const fullResult = await buildSslSkipResult(page, url, error);
+    return summarizeWholeTest(fullResult);
+  }
+}
 
-  console.log('[main] waiting for page to settle');
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForTimeout(config.waitAfterLoadMs);
+await page.waitForTimeout(config.waitAfterLoadMs);
 
     const finalUrlAfterInitialLoad = page.url();
 
