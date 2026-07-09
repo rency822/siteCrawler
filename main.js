@@ -518,61 +518,49 @@ async function gotoWithRetry(page, url, opts = {}) {
 async function runFlowForUrl(page, url) {
   console.log(`[main] opening ${url}`);
 
-try {
-  await gotoWithRetry(page, url, {
-    name: 'main',
-    retries: 3,
-    timeoutMs: config.navigationTimeoutMs,
-    waitUntil: 'domcontentloaded',
-    retryDelayMs: 2000,
-  });
-} catch (error) {
-  if (isSslCertificateError(error)) {
-    const fullResult = await buildSslSkipResult(page, url, error);
-    return summarizeWholeTest(fullResult);
-  }
-
-  throw error;
-}
-
-console.log('[main] waiting for page to settle');
-
-try {
-  await page.waitForLoadState('networkidle', {
-    timeout: config.navigationTimeoutMs,
-  });
-} catch (error) {
-  if (isSslCertificateError(error)) {
-    const fullResult = await buildSslSkipResult(page, url, error);
-    return summarizeWholeTest(fullResult);
-  }
-}
-
-await page.waitForTimeout(config.waitAfterLoadMs);
-
-    const finalUrlAfterInitialLoad = page.url();
-
-        if (isSfwUrl(finalUrlAfterInitialLoad) || isBlockedPagesUrl(finalUrlAfterInitialLoad)) {
-          const skipReason = isBlockedPagesUrl(finalUrlAfterInitialLoad)
-            ? 'Start URL redirected to blockedpages.com'
-            : 'Start URL redirected to SFW';
-
-          console.log(`[main] ${skipReason}`);
-          console.log(`[main] startUrl=${url}`);
-          console.log(`[main] finalUrl=${finalUrlAfterInitialLoad}`);
-
-          const fullResult = {
-            url,
-            finalUrl: finalUrlAfterInitialLoad,
-            geoCheck: null,
-            siteCrawler: null,
-            yoti: null,
-            skipped: true,
-            skipReason,
-          };
-
+  try {
+    await gotoWithRetry(page, url, {
+      name: 'main',
+      retries: 3,
+      timeoutMs: config.navigationTimeoutMs,
+      waitUntil: 'domcontentloaded',
+      retryDelayMs: 2000,
+    });
+  } catch (error) {
+    if (isSslCertificateError(error)) {
+      const fullResult = await buildSslSkipResult(page, url, error);
       return summarizeWholeTest(fullResult);
     }
+
+    throw error;
+  }
+
+  console.log('[main] waiting briefly after domcontentloaded');
+  await page.waitForTimeout(config.waitAfterLoadMs);
+
+  const finalUrlAfterInitialLoad = page.url();
+
+  if (isSfwUrl(finalUrlAfterInitialLoad) || isBlockedPagesUrl(finalUrlAfterInitialLoad)) {
+    const skipReason = isBlockedPagesUrl(finalUrlAfterInitialLoad)
+      ? 'Start URL redirected to blockedpages.com'
+      : 'Start URL redirected to SFW';
+
+    console.log(`[main] ${skipReason}`);
+    console.log(`[main] startUrl=${url}`);
+    console.log(`[main] finalUrl=${finalUrlAfterInitialLoad}`);
+
+    const fullResult = {
+      url,
+      finalUrl: finalUrlAfterInitialLoad,
+      geoCheck: null,
+      siteCrawler: null,
+      yoti: null,
+      skipped: true,
+      skipReason,
+    };
+
+    return summarizeWholeTest(fullResult);
+  }
 
   let modalResult = null;
 

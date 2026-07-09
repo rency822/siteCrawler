@@ -1,52 +1,66 @@
 async function waitForYotiModal(page, opts = {}) {
   const name = opts.name || 'yoti';
   const timeoutMs = opts.timeoutMs || 25000;
+  const detectTimeoutMs = opts.detectTimeoutMs || 10000;
+  const selectorTimeoutMs = opts.selectorTimeoutMs || 1500;
 
-  console.log(`[${name}] waiting for Next root`);
+  console.log(`[${name}] checking for Yoti modal/script`);
+  console.log(`[${name}] detectTimeoutMs=${detectTimeoutMs}`);
 
   await page
     .locator('#__next')
     .waitFor({
       state: 'attached',
-      timeout: timeoutMs,
+      timeout: Math.min(detectTimeoutMs, 5000),
     })
     .catch(() => {
-      console.log(`[${name}] #__next was not found before timeout`);
+      console.log(`[${name}] #__next was not found quickly`);
     });
-
-  console.log(`[${name}] waiting for YPP age script or Yoti modal`);
 
   await page
     .waitForFunction(
       () => {
         return Boolean(
           document.querySelector('#ypp-age-tour-script') ||
-            document.querySelector('#YppAgeTourModal')
+            document.querySelector('#YppAgeTourModal') ||
+            document.querySelector('#ypp-age-email') ||
+            document.querySelector('#ypp-age-submit')
         );
       },
-      { timeout: timeoutMs }
+      { timeout: detectTimeoutMs }
     )
     .catch(() => {
-      console.log(`[${name}] YPP age script/modal did not appear before timeout`);
+      console.log(`[${name}] YPP age script/modal did not appear before detect timeout`);
     });
-
-  console.log(`[${name}] waiting for full Yoti modal structure`);
 
   await page
     .waitForFunction(
       () => {
-        return Boolean(
-          document.querySelector('#YppAgeTourModal') &&
-            document.querySelector('#YppAgeTourModal .modal-box') &&
-            document.querySelector('#YppAgeTourModal .ypp-modal-content') &&
-            document.querySelector('#ypp-age-email') &&
-            document.querySelector('#ypp-age-submit')
+        const modal = document.querySelector('#YppAgeTourModal');
+        const email = document.querySelector('#ypp-age-email');
+        const submit = document.querySelector('#ypp-age-submit');
+
+        if (!modal || !email || !submit) {
+          return false;
+        }
+
+        const modalStyle = window.getComputedStyle(modal);
+        const emailStyle = window.getComputedStyle(email);
+        const submitStyle = window.getComputedStyle(submit);
+
+        return (
+          modalStyle.display !== 'none' &&
+          modalStyle.visibility !== 'hidden' &&
+          emailStyle.display !== 'none' &&
+          emailStyle.visibility !== 'hidden' &&
+          submitStyle.display !== 'none' &&
+          submitStyle.visibility !== 'hidden'
         );
       },
-      { timeout: timeoutMs }
+      { timeout: Math.min(timeoutMs, detectTimeoutMs) }
     )
     .catch(() => {
-      console.log(`[${name}] full Yoti modal structure did not appear before timeout`);
+      console.log(`[${name}] visible Yoti modal structure did not appear before detect timeout`);
     });
 
   const result = {
@@ -58,73 +72,93 @@ async function waitForYotiModal(page, opts = {}) {
 
     yppAgeTourModalPresent: await page
       .locator('#YppAgeTourModal')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     modalBoxPresent: await page
       .locator('#YppAgeTourModal .modal-box')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     modalContentPresent: await page
       .locator('#YppAgeTourModal .ypp-modal-content')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     firstColumnPresent: await page
       .locator('#yoti-first-column')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     secondColumnPresent: await page
       .locator('#yoti-second-column')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     logoPresent: await page
       .locator('#ypp-logo')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     emailInputPresent: await page
       .locator('#ypp-age-email')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     submitButtonPresent: await page
       .locator('#ypp-age-submit')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     footerPresent: await page
       .locator('#YppAgeTourModal .yoti-footer')
-      .isVisible({ timeout: 1000 })
+      .isVisible({ timeout: selectorTimeoutMs })
       .catch(() => false),
 
     requiredTextPresent: false,
     fullyPresent: false,
   };
 
+  if (!result.yppAgeTourModalPresent && !result.emailInputPresent && !result.submitButtonPresent) {
+    result.fullyPresent = false;
+
+    console.log(`[${name}] yppAgeTourScriptPresent=${result.yppAgeTourScriptPresent}`);
+    console.log(`[${name}] yppAgeTourModalPresent=${result.yppAgeTourModalPresent}`);
+    console.log(`[${name}] emailInputPresent=${result.emailInputPresent}`);
+    console.log(`[${name}] submitButtonPresent=${result.submitButtonPresent}`);
+    console.log(`[${name}] fullyPresent=${result.fullyPresent}`);
+
+    return result;
+  }
+
   const modalText = await page
     .locator('#YppAgeTourModal')
-    .innerText({ timeout: 1000 })
+    .innerText({ timeout: 2000 })
     .catch(() => '');
 
   result.requiredTextPresent =
     /You must be 18\+ to access this website/i.test(modalText) ||
     /age verification is required/i.test(modalText) ||
-    /START AGE VERIFICATION/i.test(modalText);
+    /START AGE VERIFICATION/i.test(modalText) ||
+    /age verification/i.test(modalText) ||
+    /18\+/i.test(modalText) ||
+    /verify/i.test(modalText) ||
+    /verification/i.test(modalText);
 
   result.fullyPresent =
     result.yppAgeTourModalPresent &&
-    result.modalBoxPresent &&
     result.emailInputPresent &&
     result.submitButtonPresent &&
-    result.requiredTextPresent;
+    (
+      result.modalBoxPresent ||
+      result.modalContentPresent ||
+      result.requiredTextPresent
+    );
 
   console.log(`[${name}] yppAgeTourScriptPresent=${result.yppAgeTourScriptPresent}`);
   console.log(`[${name}] yppAgeTourModalPresent=${result.yppAgeTourModalPresent}`);
   console.log(`[${name}] modalBoxPresent=${result.modalBoxPresent}`);
+  console.log(`[${name}] modalContentPresent=${result.modalContentPresent}`);
   console.log(`[${name}] emailInputPresent=${result.emailInputPresent}`);
   console.log(`[${name}] submitButtonPresent=${result.submitButtonPresent}`);
   console.log(`[${name}] requiredTextPresent=${result.requiredTextPresent}`);
@@ -239,9 +273,8 @@ async function runRandomEmailRedirectTest(page, testCase, opts = {}) {
       console.log(`[${name}] redirect wait timed out`);
     });
 
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(2000);
+  await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(1200);
 
   const afterUrl = page.url();
   const passed = testCase.expectedUrlPattern.test(afterUrl);
@@ -291,10 +324,9 @@ async function analyzeAfterValidEmail(page, opts = {}) {
     passed: false,
   };
 
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(2000);
-
+    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+    
   const currentUrlAfterWait = page.url();
 
   result.currentUrl = currentUrlAfterWait;
@@ -428,6 +460,85 @@ async function analyzeAfterValidEmail(page, opts = {}) {
   return result;
 }
 
+async function waitForValidEmailResult(page, opts = {}) {
+  const name = opts.name || 'yoti';
+  const timeoutMs = opts.timeoutMs || 25000;
+  const beforeUrl = opts.beforeUrl || page.url();
+  const safePassageUrlPattern = opts.safePassageUrlPattern || /safepassageapp\.com/i;
+
+  console.log(`[${name}] waiting for valid email result`);
+  console.log(`[${name}] valid email beforeUrl=${beforeUrl}`);
+
+  try {
+    await page.waitForFunction(
+      ({ beforeUrlString, safePassagePatternString }) => {
+        const currentUrl = window.location.href;
+        const safePassageRegex = new RegExp(
+          safePassagePatternString.replace(/^\/|\/[a-z]*$/gi, ''),
+          'i'
+        );
+
+        const redirectedToSafepassage = safePassageRegex.test(currentUrl);
+        const urlChanged = currentUrl !== beforeUrlString;
+
+        const yotiModal = document.querySelector('#YppAgeTourModal');
+        const emailInput = document.querySelector('#ypp-age-email');
+        const submitButton = document.querySelector('#ypp-age-submit');
+
+        const yotiStillVisible =
+          yotiModal &&
+          window.getComputedStyle(yotiModal).display !== 'none' &&
+          window.getComputedStyle(yotiModal).visibility !== 'hidden';
+
+        const bodyText = document.body ? document.body.innerText || '' : '';
+
+        const tourContentPresent =
+          /Get Your Instant Access/i.test(bodyText) ||
+          /INCLUDED IN YOUR MEMBERSHIP/i.test(bodyText) ||
+          /Latest Scenes/i.test(bodyText) ||
+          /Newest Scene/i.test(bodyText) ||
+          /All Models/i.test(bodyText) ||
+          /Join/i.test(bodyText);
+
+        const yotiCleared =
+          !yotiStillVisible &&
+          !emailInput &&
+          !submitButton;
+
+        return (
+          redirectedToSafepassage ||
+          urlChanged ||
+          yotiCleared ||
+          tourContentPresent
+        );
+      },
+      {
+        beforeUrlString: beforeUrl,
+        safePassagePatternString: safePassageUrlPattern.toString(),
+      },
+      {
+        timeout: timeoutMs,
+      }
+    );
+  } catch {
+    console.log(`[${name}] valid email result wait timed out`);
+  }
+
+  await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+
+  const afterUrl = page.url();
+
+  console.log(`[${name}] valid email after wait url=${afterUrl}`);
+  console.log(`[${name}] valid email redirectedToSafepassage=${safePassageUrlPattern.test(afterUrl)}`);
+
+  return {
+    beforeUrl,
+    afterUrl,
+    redirectedToSafepassage: safePassageUrlPattern.test(afterUrl),
+  };
+}
+
 async function runValidEmailContentTest(page, testCase, opts = {}) {
   const name = opts.name || 'yoti';
   const timeoutMs = opts.timeoutMs || 25000;
@@ -451,27 +562,42 @@ async function runValidEmailContentTest(page, testCase, opts = {}) {
     timeoutMs,
   });
 
+  const validEmailWait = await waitForValidEmailResult(page, {
+    name,
+    timeoutMs,
+    beforeUrl,
+    safePassageUrlPattern,
+  });
+
   const analysis = await analyzeAfterValidEmail(page, {
     name,
     timeoutMs,
     safePassageUrlPattern,
   });
 
+  const redirectedToSafepassage =
+    validEmailWait.redirectedToSafepassage === true ||
+    analysis.redirectedToSafepassage === true ||
+    safePassageUrlPattern.test(validEmailWait.afterUrl || '') ||
+    safePassageUrlPattern.test(analysis.currentUrl || '');
+
   return {
     label: testCase.label,
     email: testCase.email,
     beforeUrl,
-    afterUrl: analysis.currentUrl,
+    afterUrl: analysis.currentUrl || validEmailWait.afterUrl,
 
-    redirectedToSafepassage: analysis.redirectedToSafepassage === true,
-    skipCurrentUrl: analysis.redirectedToSafepassage === true,
+    validEmailWait,
+
+    redirectedToSafepassage,
+    skipCurrentUrl: redirectedToSafepassage,
     skipReason:
-      analysis.redirectedToSafepassage === true
+      redirectedToSafepassage === true
         ? analysis.skipReason || 'Correct email redirected to SafePassage instead of start URL/tour content'
         : null,
 
     analysis,
-    passed: analysis.passed,
+    passed: redirectedToSafepassage ? false : analysis.passed,
   };
 }
 
@@ -487,8 +613,7 @@ async function returnToStartUrl(page, startUrl, opts = {}) {
     timeout: timeoutMs,
   });
 
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-  await page.waitForTimeout(3000);
+    await page.waitForTimeout(2500);
 
   console.log(`[${name}] after return currentUrl=${page.url()}`);
 
@@ -535,7 +660,9 @@ async function yoti(page, opts = {}) {
     result.modalPresence = await waitForYotiModal(page, {
       name,
       timeoutMs,
-    });
+      detectTimeoutMs: 10000,
+      selectorTimeoutMs: 1500,
+    }); 
 
     if (!result.modalPresence.fullyPresent) {
       result.present = false;
@@ -576,10 +703,11 @@ async function yoti(page, opts = {}) {
     console.log(`[${name}] original startUrl=${startUrl}`);
 
     result.secondModalPresence = await waitForYotiModal(page, {
-      name,
-      timeoutMs,
-    });
-
+        name,
+        timeoutMs,
+        detectTimeoutMs: 18000,
+        selectorTimeoutMs: 2000,
+      }); 
     console.log(
       `[${name}] secondModalPresence.fullyPresent=${result.secondModalPresence.fullyPresent}`
     );

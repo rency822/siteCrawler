@@ -569,14 +569,13 @@ async function getPageBasics(page) {
 
 async function gotoAndSettle(page, url, opts = {}) {
   const timeoutMs = opts.timeoutMs || 30000;
-  const waitAfterLoadMs = opts.waitAfterLoadMs || 1000;
+  const waitAfterLoadMs = opts.waitAfterLoadMs || 700;
 
   const response = await page.goto(url, {
     waitUntil: 'domcontentloaded',
     timeout: timeoutMs,
   });
 
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(waitAfterLoadMs);
 
   return response;
@@ -811,8 +810,7 @@ async function quickVideoPlaybackCheck(page, opts = {}) {
       return result;
     }
 
-    await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(playCheckMs);
 
     result.afterUrl = page.url();
