@@ -36,5 +36,5 @@ To get this project running locally, ensure you have [Node.js](https://nodejs.or
    cd siteCrawler
 
 ## To run
-Make sure URL's are inside the url.txt one per line
-run npm main.js
+* Make sure URL's are inside the url.txt one per line.
+* run npm main.js.
