@@ -11,3 +11,5 @@ results/
 urls.txt
 HGV PHX.txt
 KP.txt
+package-lock.json
+package.json
